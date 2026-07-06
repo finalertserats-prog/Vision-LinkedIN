@@ -1,0 +1,61 @@
+# --- Python bytecode & caches ---------------------------------------------
+# Compiled artefacts should never be committed; they are host/interpreter
+# specific and regenerate automatically.
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Virtual environments --------------------------------------------------
+# Local interpreters are per-machine; dependencies are pinned in pyproject.toml.
+.venv/
+venv/
+env/
+ENV/
+
+# --- Packaging / build outputs ---------------------------------------------
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# --- Test & coverage artefacts ---------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Secrets & local config ------------------------------------------------
+# The real .env carries secrets (HMAC key, token-encryption key, LinkedIn
+# client secret). Only .env.example (placeholders) is tracked.
+.env
+.env.*
+!.env.example
+
+# --- Local databases -------------------------------------------------------
+# SQLite dev databases are disposable and may contain live drafts/tokens.
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# --- OS / editor noise -----------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Runtime assets that should not be versioned ---------------------------
+# Rendered image cards and generated illustrations are build artefacts.
+/var/
+/tmp/
+rendered/
+
+# Local-only: references private finalert internals; junk draft
+prep/finalert_reuse.md
+prep/voice_profile_draft.yaml

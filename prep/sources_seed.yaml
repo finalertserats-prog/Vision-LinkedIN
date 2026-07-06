@@ -1,0 +1,134 @@
+# Curated source seed for Project VISION (BRD §12.2). Loaded into the `sources` table.
+# Config-over-code (§22): edit here / in the DB, never hard-code feeds.
+# authority_weight: 0-1 trust weight used in scoring. enabled: toggle without code change.
+# kind: rss | api | scrape. Feeds flagged `verify: true` should be health-checked on first run;
+# feed-health tracking (sources.last_ok_at) disables persistently-dead feeds automatically.
+
+hc_lane:
+  - name: "STAT News"
+    lane: hc
+    kind: rss
+    url: "https://www.statnews.com/feed/"
+    authority_weight: 0.95
+    enabled: true
+  - name: "Endpoints News"
+    lane: hc
+    kind: rss
+    url: "https://endpts.com/feed/"
+    authority_weight: 0.90
+    enabled: true
+  - name: "Fierce Healthcare"
+    lane: hc
+    kind: rss
+    url: "https://www.fiercehealthcare.com/rss/xml"
+    authority_weight: 0.85
+    enabled: true
+  - name: "Healthcare IT News"
+    lane: hc
+    kind: rss
+    url: "https://www.healthcareitnews.com/home/feed"
+    authority_weight: 0.80
+    enabled: true
+  - name: "MobiHealthNews"
+    lane: hc
+    kind: rss
+    url: "https://www.mobihealthnews.com/feed"
+    authority_weight: 0.78
+    enabled: true
+  - name: "Nature Medicine"
+    lane: hc
+    kind: rss
+    url: "https://www.nature.com/nm.rss"
+    authority_weight: 0.95
+    enabled: true
+  - name: "FDA Press Releases"
+    lane: hc
+    kind: rss
+    url: "https://www.fda.gov/about-fda/contact-fda/stay-informed/rss-feeds/press-releases/rss.xml"
+    authority_weight: 0.92
+    enabled: true
+    verify: true
+  - name: "WHO News"
+    lane: hc
+    kind: rss
+    url: "https://www.who.int/rss-feeds/news-english.xml"
+    authority_weight: 0.88
+    enabled: true
+    verify: true
+
+ai_lane:
+  - name: "arXiv cs.AI"
+    lane: ai
+    kind: rss
+    url: "http://export.arxiv.org/rss/cs.AI"
+    authority_weight: 0.80
+    enabled: true
+  - name: "arXiv cs.LG"
+    lane: ai
+    kind: rss
+    url: "http://export.arxiv.org/rss/cs.LG"
+    authority_weight: 0.80
+    enabled: true
+  - name: "arXiv cs.CL"
+    lane: ai
+    kind: rss
+    url: "http://export.arxiv.org/rss/cs.CL"
+    authority_weight: 0.78
+    enabled: true
+  - name: "The Batch (DeepLearning.AI)"
+    lane: ai
+    kind: rss
+    url: "https://www.deeplearning.ai/the-batch/feed/"
+    authority_weight: 0.85
+    enabled: true
+    verify: true
+  - name: "MIT Technology Review — AI"
+    lane: ai
+    kind: rss
+    url: "https://www.technologyreview.com/topic/artificial-intelligence/feed/"
+    authority_weight: 0.88
+    enabled: true
+    verify: true
+  - name: "Hugging Face Blog"
+    lane: ai
+    kind: rss
+    url: "https://huggingface.co/blog/feed.xml"
+    authority_weight: 0.75
+    enabled: true
+    verify: true
+  - name: "Anthropic News"
+    lane: ai
+    kind: rss
+    url: "https://www.anthropic.com/rss.xml"
+    authority_weight: 0.85
+    enabled: true
+    verify: true  # confirm feed path on first run; disable if 404
+  - name: "Google DeepMind Blog"
+    lane: ai
+    kind: rss
+    url: "https://deepmind.google/blog/rss.xml"
+    authority_weight: 0.85
+    enabled: true
+    verify: true  # confirm feed path on first run; disable if 404
+  - name: "Hacker News (front page)"
+    lane: ai
+    kind: api
+    url: "https://hacker-news.firebaseio.com/v0/topstories.json"
+    authority_weight: 0.55  # noisy — filter hard for LS/HC x AI relevance
+    enabled: true
+
+crosscut_lane:
+  - name: "Nature Digital Medicine"
+    lane: hc
+    kind: rss
+    url: "https://www.nature.com/npjdigitalmed.rss"
+    authority_weight: 0.92
+    enabled: true
+    verify: true
+  - name: "Health Affairs"
+    lane: hc
+    kind: rss
+    url: "https://www.healthaffairs.org/action/showFeed?type=etoc&feed=rss&jc=hlthaff"
+    authority_weight: 0.88
+    enabled: true
+    verify: true

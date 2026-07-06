@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# Project VISION — package metadata & build configuration.
+#
+# WHY this shape: a src/ layout keeps the importable package isolated from the
+# repo root (no accidental imports of tests/spikes), and PEP 621 metadata lets
+# `pip install -e .` wire the console entry points used by the daily/publisher/
+# token cron jobs described in BRD §10.2.
+# ---------------------------------------------------------------------------
+
+[build-system]
+# setuptools is the reference PEP 517 backend; no exotic tooling needed for a
+# pure-Python service, so we keep the build dependency surface minimal.
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vision-linkedin"
+version = "0.1.0"
+description = "VISION — a self-hosted daily AI-assisted LinkedIn insight engine (generate -> critique -> verify -> approve -> publish)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Vishnu Dattu Kurnuthala" }]
+keywords = ["linkedin", "automation", "llm", "brahmastra", "healthcare", "ai"]
+
+# Runtime dependencies. Versions are floored (not pinned) here; exact pins live
+# in the deployment lockfile so the library stays installable across envs while
+# production remains reproducible (BRD §22 config-over-code / reproducibility).
+dependencies = [
+    "sqlalchemy>=2.0",          # DB-agnostic ORM (SQLite dev / Postgres prod, BRD §22)
+    "alembic>=1.13",            # schema migrations wired to the models' metadata
+    "pydantic>=2.0",            # strict schema validation of LLM JSON contracts (§13.4)
+    "pydantic-settings>=2.0",   # typed env-var loading for the Settings class (§Appendix A)
+    "httpx>=0.27",              # async HTTP client for LinkedIn / email providers
+    "feedparser>=6.0",          # RSS/Atom parsing for the ingest lane (FR-01)
+    "python-dateutil>=2.9",     # robust parsing of heterogeneous feed timestamps
+    "jinja2>=3.1",              # approval-email + edit-page templating (§14)
+    "fastapi>=0.110",           # always-on approval service (/approve /reject /edit)
+    "uvicorn>=0.29",            # ASGI server for the FastAPI approval app
+    "cryptography>=42.0",       # encrypt OAuth tokens at rest (NFR-05 / §11.6)
+    "tenacity>=8.2",            # retry/backoff for transient feed/LLM/LinkedIn failures (NFR-07)
+]
+
+[project.optional-dependencies]
+# Dev extras are installed with `pip install -e ".[dev]"`. Kept separate so the
+# production image never ships test tooling.
+dev = [
+    "pytest>=8.0",            # test runner (BRD §18)
+    "pytest-asyncio>=0.23",  # async test support for httpx-based clients
+    "respx>=0.21",           # mock httpx requests (mock external deps, not internal logic)
+    "ruff>=0.4",             # lint + format
+]
+
+[project.scripts]
+# Console entry points map to the process model in BRD §10.2. They are wired to
+# thin CLI stubs now; the real command implementations land in later phases.
+vision-daily = "vision.cli.daily:main"
+vision-publisher = "vision.cli.publisher:main"
+vision-token = "vision.cli.token:main"
+
+[tool.setuptools.packages.find]
+# Discover the `vision` package (and subpackages) under src/ only.
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Point pytest at the src/ layout and the tests/ dir; asyncio auto mode lets
+# async tests run without a per-test decorator.
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+# Match the repo's line-length convention and target the minimum runtime.
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
