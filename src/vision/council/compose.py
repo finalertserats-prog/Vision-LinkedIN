@@ -299,7 +299,10 @@ class Composer:
             "4. Write a 'Council' block: exactly 3 short bullet lines capturing the distinct "
             "viewpoints — NO names, just the positions. Then a final standalone line: "
             "'Powered by Brahmastra'.\n\n"
-            "OUTPUT EXACTLY in this shape:\n"
+            "OUTPUT EXACTLY in this shape. You MUST include the literal headers "
+            "FORMAT:, SITUATION:, POST:, and COUNCIL: each on their own line — ALWAYS, "
+            "for EVERY format including quiet_observation (the post body goes under the "
+            "POST: header even when it reads as a plain reflection):\n"
             "FORMAT: <chosen_format_name>\n"
             "SITUATION: <disagreed|agreed|shifted> — <one line why>\n"
             "POST:\n<the post>\n"
@@ -325,29 +328,49 @@ class Composer:
                 AI/model/vendor — the leak aborts the compose (never published).
         """
         prompt = self._build_prompt(delib)
-        logger.info("Council composing (editorial voice).")
-        raw = self._voices.ask(CLAUDE, prompt)
-        if not raw.strip():
-            raise RuntimeError("Council compose produced no output; nothing to publish.")
+        last_error = "no attempts made"
+        # Up to 3 attempts: the composing voice is non-deterministic, so a one-off
+        # parse miss (the editor dropped the POST:/COUNCIL: markers — seen on the
+        # 'quiet_observation' format) is usually cured by a re-ask. A LEAK, by
+        # contrast, is a hard fail-closed and is NEVER retried.
+        for attempt in range(1, 4):
+            logger.info("Council composing (editorial voice).", extra={"attempt": attempt})
+            raw = self._voices.ask(CLAUDE, prompt)
+            if not raw.strip():
+                last_error = "empty output"
+                continue
 
-        composed = _parse_composition(raw)
+            composed = _parse_composition(raw)
 
-        # Format-variety bookkeeping: only remember a real, known format so a
-        # parse miss ('unknown') doesn't pollute the recent history.
-        if composed.format in FORMATS:
-            self._recent.remember(composed.format)
-
-        # De-naming gate — FAIL CLOSED. A forbidden name in EITHER published
-        # surface aborts: we never return a leaking post. Log the offending token
-        # (only the token, not the surrounding text) for the alert, then raise.
-        leak = find_forbidden_name(composed.post_text) or find_forbidden_name(
-            composed.council_block
-        )
-        if leak is not None:
-            logger.error(
-                "Composed post/council block names a forbidden AI/model; aborting.",
-                extra={"forbidden_match": leak},
+            # De-naming gate FIRST — FAIL CLOSED, no retry. A forbidden name in
+            # EITHER published surface aborts immediately: we never return (or retry
+            # away) a leaking post — the #1 rule wins over shipping.
+            leak = find_forbidden_name(composed.post_text) or find_forbidden_name(
+                composed.council_block
             )
-            raise ForbiddenNameError(leak)
+            if leak is not None:
+                logger.error(
+                    "Composed post/council block names a forbidden AI/model; aborting.",
+                    extra={"forbidden_match": leak},
+                )
+                raise ForbiddenNameError(leak)
 
-        return composed
+            # Parse-miss guard — an empty post OR council block means the editor did
+            # not emit the expected sections. Retry rather than return an empty draft
+            # (a silent failure for an autonomous pipeline). This is the bug that let
+            # an empty 'quiet_observation' post through before.
+            if not composed.post_text.strip() or not composed.council_block.strip():
+                last_error = "parse miss: empty post or council block"
+                logger.warning("Council compose parse miss; retrying.", extra={"attempt": attempt})
+                continue
+
+            # Success: record the format (only real, known formats) and return.
+            if composed.format in FORMATS:
+                self._recent.remember(composed.format)
+            return composed
+
+        # All attempts exhausted without a usable post → fail closed, never publish
+        # an empty draft.
+        raise RuntimeError(
+            f"Council compose produced no usable post after 3 attempts ({last_error})."
+        )

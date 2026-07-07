@@ -198,6 +198,40 @@ def test_compose_output_strips_all_ai_names(tmp_path: Path) -> None:
         assert name not in result.council_block
 
 
+def test_compose_retries_then_fails_closed_on_empty_post(tmp_path: Path) -> None:
+    # The editor returns a FORMAT header but no POST/COUNCIL body — the exact
+    # parse-miss that let an empty 'quiet_observation' post slip through before.
+    header_only = "FORMAT: quiet_observation\nSITUATION: agreed — converged\nno markers here"
+    fake = FakeVoices(lambda voice, prompt: header_only)
+    composer = Composer(
+        voices=fake, recent_store=RecentFormatStore(path=tmp_path / "s.json"),
+        settings=_settings(tmp_path),
+    )
+
+    # Act / Assert: an empty post is NEVER returned — it fails closed after retrying.
+    with pytest.raises(RuntimeError):
+        composer.compose(_delib())
+    # It retried rather than returning empty on the first miss: 3 attempts.
+    assert len(fake.calls) == 3
+
+
+def test_compose_recovers_from_a_parse_miss_on_retry(tmp_path: Path) -> None:
+    # First attempt is a parse-miss (empty post); the re-ask returns a good post.
+    outputs = iter(["FORMAT: quiet_observation\nSITUATION: agreed\n(no body)", _GOOD_COMPOSITION])
+    fake = FakeVoices(lambda voice, prompt: next(outputs))
+    composer = Composer(
+        voices=fake, recent_store=RecentFormatStore(path=tmp_path / "s.json"),
+        settings=_settings(tmp_path),
+    )
+
+    # Act: the composer recovers on the second attempt.
+    result = composer.compose(_delib())
+
+    # Assert: it returned the real post, after exactly two asks.
+    assert "one right answer" in result.post_text
+    assert len(fake.calls) == 2
+
+
 def test_contains_forbidden_name_detects_leak() -> None:
     # Arrange / Act / Assert: the de-naming guard flags an AI name...
     assert contains_forbidden_name("As Claude argued, we should wait") is True
