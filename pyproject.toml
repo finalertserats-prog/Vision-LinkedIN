@@ -60,8 +60,8 @@ dev = [
 # Console entry points map to the process model in BRD §10.2. They are wired to
 # thin CLI stubs now; the real command implementations land in later phases.
 vision-daily = "vision.cli.daily:main"
-vision-publisher = "vision.cli.publisher:main"
-vision-token = "vision.cli.token:main"
+vision-publisher = "vision.publish.worker:main"  # FR-12/13/14: real publisher — publish approved & due drafts (§15.2/§15.4)
+vision-token = "vision.publish.token_refresh:main"  # FR-17: daily proactive OAuth token refresh (§15.3)
 vision-expire = "vision.cli.expire:main"  # FR-16: cron at cutoff (default 20:00 IST) auto-expires un-actioned drafts
 
 [tool.setuptools.packages.find]

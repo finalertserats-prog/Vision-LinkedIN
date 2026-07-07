@@ -20,7 +20,15 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, LargeBinary, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    LargeBinary,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from vision.db.base import (
@@ -249,6 +257,18 @@ class OAuthToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     __tablename__ = "oauth_tokens"
 
+    # WHY a UNIQUE (provider, member_urn): a stored credential is the single live
+    # record for one account, and token refresh is a read-modify-write that two
+    # cron/worker processes can run concurrently. Without a DB-level uniqueness
+    # guard, both could see "no row" and INSERT, leaving two live rows — a later
+    # ``scalar_one_or_none`` would then raise ``MultipleResultsFound`` and the
+    # account would be unusable. The constraint makes a losing insert race fail
+    # fast (IntegrityError) so writers serialise on the database, not just on an
+    # in-process lock (threat model §3 "atomic token replacement / refresh races").
+    __table_args__ = (
+        UniqueConstraint("provider", "member_urn", name="uq_oauth_tokens_provider_member"),
+    )
+
     provider: Mapped[str] = mapped_column(
         Text, nullable=False, default="linkedin", doc="Token provider, e.g. 'linkedin'."
     )
@@ -267,8 +287,12 @@ class OAuthToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         DateTime(timezone=True), nullable=True, doc="Refresh token expiry (~365d)."
     )
     # The authenticated member's URN — the author identity for posts (§15.6).
-    member_urn: Mapped[str | None] = mapped_column(
-        Text, nullable=True, doc="urn:li:person:{sub} author identity."
+    # NOT NULL: it is half the natural key (with ``provider``) and the associated
+    # data the tokens are encrypted against, so a real credential row cannot exist
+    # without it. A nullable member_urn would also defeat the UNIQUE guard above,
+    # since SQL treats distinct NULLs as non-equal (duplicate NULL rows allowed).
+    member_urn: Mapped[str] = mapped_column(
+        Text, nullable=False, doc="urn:li:person:{sub} author identity (natural key half)."
     )
 
 

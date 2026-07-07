@@ -22,3 +22,19 @@ populated `.env` (copy from `.env.example`). They read configuration through
 > Note: spikes may touch live external systems (LinkedIn, email provider). Run
 > them in `staging` mode where possible; the LinkedIn spike posts **then
 > immediately deletes** a clearly-marked test post (LinkedIn has no draft state).
+
+### `spike_linkedin.py` — required config
+
+`spike_linkedin.py` needs **real** LinkedIn developer-app credentials in `.env`
+before it can run (it drives the live OAuth + Posts API):
+
+- `LI_CLIENT_ID` and `LI_CLIENT_SECRET` — from your LinkedIn app (never commit
+  these; `.env` is git-ignored).
+- `LI_REDIRECT_URI` — must match an *Authorized redirect URL* on the app exactly.
+- `VISION_ENV=staging` — the spike **refuses to run** unless it is in staging, so
+  the "hello world" test post is published and then deleted immediately.
+
+The one-time LinkedIn app setup (products/scopes/redirect URL, BRD §15.1) is
+documented at the top of `spike_linkedin.py`. The script never logs or CLI-args
+the access token, refresh token, or the authorization code — only non-secret
+status (member URN, created post URN).

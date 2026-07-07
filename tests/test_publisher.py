@@ -1,0 +1,499 @@
+"""Unit tests for the real LinkedIn publisher worker (BRD §15.2/§15.4, FR-12/13/14).
+
+WHY these tests / how they stay hermetic (BRD §18 — tests are part of done):
+  * ``LinkedInClient`` is a ``MagicMock(spec=LinkedInClient)`` — **no real network
+    and no real post** ever leaves the process. Every publish/upload/delete/refresh
+    is a mock whose return value or ``side_effect`` we control.
+  * The email sender is a ``Mock`` — no mail is sent; we only assert that a
+    confirmation / alert *would* have been sent, and exactly how many times.
+  * The DB is the in-memory SQLite ``db_session`` fixture from ``conftest``.
+  * The clock (``now``) and the backoff (``max_attempts``/``backoff_base``) are
+    injected so retries never actually sleep and timestamps are deterministic.
+
+Each test follows AAA (Arrange → Act → Assert) with a single behavioural focus,
+covering the required matrix: idempotent no-op, text publish (URN + transition +
+one confirmation), image publish, 401→refresh→retry, repeated 5xx→dead-letter+
+alert, dry_run posts nothing, staging posts-then-deletes, and due-filtering in
+``poll_and_publish``.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, Mock
+
+import pytest
+from sqlalchemy.orm import Session
+
+from vision.config import Settings, SignatureMode, VisionEnv, get_settings
+from vision.db.models import Draft, OAuthToken
+from vision.publish.errors import NeedsReauth, RateLimited, TransientLinkedInError
+from vision.publish.linkedin import LinkedInClient
+from vision.publish.worker import LinkedInPublisher, encrypt_token
+
+# --- Deterministic test constants ------------------------------------------
+# A fixed reference "now" so every scheduled_for comparison is fully deterministic.
+_NOW: datetime = datetime(2026, 7, 6, 12, 0, 0, tzinfo=timezone.utc)
+# Obviously-fake secrets/values — nothing here is a real credential.
+_ENC_KEY = "unit-test-token-enc-key"  # noqa: S105 - test placeholder
+_ACCESS = "access-token-value"  # noqa: S105 - test placeholder
+_REFRESH = "refresh-token-value"  # noqa: S106 - test placeholder
+_NEW_ACCESS = "fresh-access-token-value"  # noqa: S105 - test placeholder
+_MEMBER_URN = "urn:li:person:TEST"
+_POST_URN = "urn:li:share:1234567890"
+_IMAGE_URN = "urn:li:image:ABC123"
+
+
+def _make_settings(env: VisionEnv, *, signature: SignatureMode = SignatureMode.OFF) -> Settings:
+    """Build deterministic settings for a given run mode with a known enc key.
+
+    ``model_copy`` produces an isolated Settings instance (no cache mutation); the
+    publisher is always handed this explicitly, so the global settings cache is
+    irrelevant to the test's behaviour.
+    """
+    get_settings.cache_clear()
+    return get_settings().model_copy(
+        update={
+            "vision_env": env,
+            "token_enc_key": _ENC_KEY,
+            "post_signature_mode": signature,
+            "image_enabled": True,
+        }
+    )
+
+
+def _seed_token(session: Session, *, with_refresh: bool = True) -> OAuthToken:
+    """Insert one LinkedIn OAuth row encrypted with the worker's own envelope.
+
+    The worker decrypts via ``vision.publish.worker.decrypt_token`` (SHA-256 key,
+    provider-bound AAD), so tokens MUST be sealed with the matching
+    ``worker.encrypt_token`` — mirroring exactly what the OAuth callback persists.
+    """
+    row = OAuthToken(provider="linkedin", member_urn=_MEMBER_URN)
+    row.access_token_enc = encrypt_token(_ACCESS, _ENC_KEY, provider="linkedin")
+    if with_refresh:
+        row.refresh_token_enc = encrypt_token(_REFRESH, _ENC_KEY, provider="linkedin")
+    session.add(row)
+    session.commit()
+    return row
+
+
+def _seed_draft(
+    session: Session,
+    *,
+    state: str = "scheduled",
+    scheduled_for: datetime | None = None,
+    post_urn: str | None = None,
+    image_type: str = "none",
+    image_path: str | None = None,
+) -> Draft:
+    """Insert one publishable draft row and return it (persistent, with a UUID)."""
+    draft = Draft(
+        state=state,
+        post_text="Hello from VISION.",
+        scheduled_for=scheduled_for if scheduled_for is not None else _NOW - timedelta(minutes=5),
+        post_urn=post_urn,
+        image_type=image_type,
+        image_path=image_path,
+    )
+    session.add(draft)
+    session.commit()
+    return draft
+
+
+def _set_publish_lease(
+    session: Session,
+    draft: Draft,
+    *,
+    lease_expires_at: datetime,
+    idempotency_key: str = "idem-key-TEST",
+    lease_owner: str = "some-other-runner",
+) -> None:
+    """Stamp a durable publish/idempotency lease onto a draft (in ``model_trace``).
+
+    The worker persists the at-most-once idempotency marker + lease (owner +
+    expiry) under ``model_trace['publish']`` BEFORE the create call, so a crashed
+    or in-flight claim can be reconciled instead of blindly re-posted. Tests seed
+    that marker directly to exercise the re-drive / lease-expiry / reaper paths
+    without having to crash mid-publish.
+    """
+    draft.model_trace = {
+        "publish": {
+            "idempotency_key": idempotency_key,
+            "attempted_at": _NOW.isoformat(),
+            "lease_owner": lease_owner,
+            "lease_expires_at": lease_expires_at.isoformat(),
+        }
+    }
+    session.add(draft)
+    session.commit()
+
+
+def _mock_client() -> MagicMock:
+    """Return a fully-mocked ``LinkedInClient`` (spec-bound so only real methods exist)."""
+    client = MagicMock(spec=LinkedInClient)
+    client.publish_text.return_value = _POST_URN
+    client.publish_with_image.return_value = _POST_URN
+    client.upload_image.return_value = _IMAGE_URN
+    # Reconciliation defaults to "no post found" so a test must opt IN to a
+    # reconcile-hit; an unconfigured MagicMock would otherwise be truthy and
+    # silently short-circuit the publish path.
+    client.find_existing_post.return_value = None
+    return client
+
+
+def _publisher(settings: Settings, client: MagicMock, mailer: Mock) -> LinkedInPublisher:
+    """Build a publisher wired to mocks with instant, capped backoff (no real sleep)."""
+    return LinkedInPublisher(
+        settings,
+        client=client,
+        mailer=mailer,
+        now=lambda: _NOW,
+        max_attempts=3,
+        backoff_base=0.0,
+        backoff_max=0.0,
+    )
+
+
+# --- Idempotency: a draft with a stored URN is never re-posted -------------
+
+
+def test_publish_is_noop_when_post_urn_already_set(db_session: Session) -> None:
+    # Arrange: a draft that already carries a post URN (already published).
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    draft = _seed_draft(db_session, state="published", post_urn=_POST_URN)
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: at-most-once guard fires — nothing is posted and no mail is sent.
+    client.publish_text.assert_not_called()
+    client.publish_with_image.assert_not_called()
+    mailer.send.assert_not_called()
+
+
+# --- LIVE text publish: URN stored, state advanced, ONE confirmation -------
+
+
+def test_live_text_publish_stores_urn_transitions_and_confirms_once(
+    db_session: Session,
+) -> None:
+    # Arrange: a due, approved text-only draft with a usable token.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: a text post was made, the URN + URL persisted, state is published,
+    # and the confirmation email was sent EXACTLY once.
+    client.publish_text.assert_called_once()
+    assert draft.post_urn == _POST_URN
+    assert draft.post_url and _POST_URN in draft.post_url
+    assert draft.state == "published"
+    mailer.send.assert_called_once()
+
+
+# --- LIVE image publish: upload → publish_with_image, image URN stored -----
+
+
+def test_live_image_publish_uploads_and_attaches_image(
+    db_session: Session, tmp_path: Path
+) -> None:
+    # Arrange: an approved draft whose visual lane produced a non-empty image file.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    image_file = tmp_path / "card.png"
+    image_file.write_bytes(b"\x89PNG-fake-bytes")
+    draft = _seed_draft(
+        db_session, image_type="informative-card", image_path=str(image_file)
+    )
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: the image was uploaded and the post used the image path (not text-only),
+    # and the returned image URN is persisted on the draft.
+    client.upload_image.assert_called_once()
+    client.publish_with_image.assert_called_once()
+    client.publish_text.assert_not_called()
+    assert draft.image_urn == _IMAGE_URN
+    assert draft.post_urn == _POST_URN
+    assert draft.state == "published"
+
+
+# --- 401 → refresh → retry once (approved draft never lost) -----------------
+
+
+def test_publish_refreshes_token_on_401_then_retries_successfully(
+    db_session: Session,
+) -> None:
+    # Arrange: the first publish attempt gets a 401; after a token refresh the
+    # retry succeeds. A refresh token is present so the refresh path is viable.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    client.publish_text.side_effect = [NeedsReauth(), _POST_URN]
+    client.refresh.return_value = {"access_token": _NEW_ACCESS, "expires_in": 5_184_000}
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: exactly one refresh, two publish attempts, and a live post recorded.
+    client.refresh.assert_called_once()
+    assert client.publish_text.call_count == 2
+    assert draft.post_urn == _POST_URN
+    assert draft.state == "published"
+
+
+# --- Repeated 429 → capped retries → dead-letter + alert --------------------
+
+
+def test_repeated_rate_limit_dead_letters_and_alerts(db_session: Session) -> None:
+    # Arrange: every publish attempt is throttled (429). A 429 is a KNOWN rejection
+    # — LinkedIn never processed the request, so no post was created — which makes
+    # it the one create failure that IS safe to retry. Backoff is 0 so the capped
+    # retries never actually sleep.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    client.publish_text.side_effect = RateLimited("throttled")
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: retried exactly the capped number of times, then dead-lettered and
+    # the owner alerted — never re-posted (post_urn stays unset).
+    assert client.publish_text.call_count == 3
+    assert draft.state == "dead_letter"
+    assert draft.post_urn is None
+    mailer.send.assert_called_once()
+
+
+# --- ISSUE 6: unknown-outcome (5xx/timeout after send) never double-posts ----
+
+
+def test_unknown_outcome_transient_does_not_double_post_in_one_run(
+    db_session: Session,
+) -> None:
+    # Arrange: the create call fails with a transient 5xx AFTER the request was
+    # sent — LinkedIn may or may not have created the post (UNKNOWN outcome). The
+    # Posts API is non-idempotent, so blindly retrying the create would duplicate.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    client.publish_text.side_effect = TransientLinkedInError("boom", status_code=503)
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: the create is attempted EXACTLY ONCE (never blind-retried) so no
+    # second post can be created within the run; the draft stays claimed
+    # ('queued') carrying its durable idempotency marker for later reconciliation,
+    # and the owner is alerted so the approved draft is never silently lost.
+    assert client.publish_text.call_count == 1
+    assert draft.state == "queued"
+    assert draft.post_urn is None
+    assert (draft.model_trace or {}).get("publish", {}).get("idempotency_key")
+    mailer.send.assert_called_once()
+
+
+# --- ISSUE 4/5: re-driving a 'queued' draft RECONCILES, never double-posts ---
+
+
+def test_redriving_queued_draft_reconciles_instead_of_double_posting(
+    db_session: Session,
+) -> None:
+    # Arrange: a draft left stranded in 'queued' by a crash between create and
+    # persist, whose lease has since expired. A post ALREADY exists for it (the
+    # prior attempt actually succeeded), which reconciliation discovers.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    client.find_existing_post.return_value = _POST_URN  # reconcile: a post exists
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session, state="queued")
+    _set_publish_lease(db_session, draft, lease_expires_at=_NOW - timedelta(minutes=1))
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: NO new post is created — reconciliation adopts the existing URN and
+    # finalises the draft as published (at-most-once preserved across the crash).
+    client.publish_text.assert_not_called()
+    client.publish_with_image.assert_not_called()
+    assert draft.post_urn == _POST_URN
+    assert draft.state == "published"
+
+
+# --- ISSUE 5: a valid (unexpired) lease blocks a second claimer -------------
+
+
+def test_valid_lease_blocks_reclaim_of_queued_draft(db_session: Session) -> None:
+    # Arrange: a draft in 'queued' whose lease is still held (not expired) — a
+    # live runner owns it right now. A second caller must NOT publish it.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session, state="queued")
+    _set_publish_lease(db_session, draft, lease_expires_at=_NOW + timedelta(minutes=5))
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: the second caller does nothing — no create, no reconcile — because
+    # the lease has not expired (no double-post while another runner is in flight).
+    client.publish_text.assert_not_called()
+    client.find_existing_post.assert_not_called()
+    assert draft.state == "queued"
+    assert draft.post_urn is None
+
+
+def test_expired_lease_and_no_existing_post_allows_reclaim_and_publishes(
+    db_session: Session,
+) -> None:
+    # Arrange: a stranded 'queued' draft whose lease has expired and for which
+    # reconciliation confirms NO post exists — so it is safe to re-claim + publish.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    client.find_existing_post.return_value = None  # reconcile: no post exists
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session, state="queued")
+    _set_publish_lease(db_session, draft, lease_expires_at=_NOW - timedelta(minutes=1))
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: reconciliation ran (confirming safety) and the draft published once.
+    client.find_existing_post.assert_called_once()
+    client.publish_text.assert_called_once()
+    assert draft.post_urn == _POST_URN
+    assert draft.state == "published"
+
+
+# --- ISSUE 4: reaper alerts on a draft stuck in 'queued' past its TTL -------
+
+
+def test_reaper_alerts_on_draft_stuck_in_queued_past_ttl(db_session: Session) -> None:
+    # Arrange: a draft that has been sitting in 'queued' far longer than its lease
+    # TTL — the symptom of an approved post that would otherwise be silently lost.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    draft = _seed_draft(db_session, state="queued")
+    _set_publish_lease(db_session, draft, lease_expires_at=_NOW - timedelta(days=2))
+
+    # Act.
+    alerted = _publisher(settings, client, mailer).reap_stuck(db_session, _NOW)
+
+    # Assert: the reaper flags exactly one stuck draft and alerts the owner so the
+    # approved post is never silently dropped.
+    assert alerted == 1
+    mailer.send.assert_called_once()
+
+
+# --- dry_run: log only, post nothing, mutate nothing ------------------------
+
+
+def test_dry_run_posts_nothing_and_leaves_state(db_session: Session) -> None:
+    # Arrange: DRY_RUN mode with a due draft and credentials available.
+    settings = _make_settings(VisionEnv.DRY_RUN)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session, state="scheduled")
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: no network publish, no mail, no URN, state untouched.
+    client.publish_text.assert_not_called()
+    client.publish_with_image.assert_not_called()
+    mailer.send.assert_not_called()
+    assert draft.post_urn is None
+    assert draft.state == "scheduled"
+
+
+# --- staging: publish then immediately delete the marked test post ----------
+
+
+def test_staging_publishes_then_deletes_marked_test_post(db_session: Session) -> None:
+    # Arrange: STAGING mode — the worker should post a marked test and delete it.
+    settings = _make_settings(VisionEnv.STAGING)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: a post was created and then deleted by URN; the draft is NOT finalised
+    # as published (it stays reusable) and no confirmation email is sent.
+    client.publish_text.assert_called_once()
+    client.delete.assert_called_once()
+    assert client.delete.call_args.args[1] == _POST_URN
+    assert draft.post_urn is None
+    assert draft.state == "scheduled"
+    mailer.send.assert_not_called()
+
+
+# --- The staging post text carries the auto-deleted marker ------------------
+
+
+def test_staging_marks_post_text_as_auto_deleted(db_session: Session) -> None:
+    # Arrange.
+    settings = _make_settings(VisionEnv.STAGING)
+    client = _mock_client()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+
+    # Act.
+    _publisher(settings, client, Mock()).publish(db_session, draft)
+
+    # Assert: the text actually sent to LinkedIn is clearly marked as a test so a
+    # stray post (if a delete ever fails) is unmistakable.
+    sent_text = client.publish_text.call_args.args[2]
+    assert "STAGING TEST" in sent_text
+
+
+# --- poll_and_publish: only approved, due, un-published drafts are posted ---
+
+
+def test_poll_and_publish_only_processes_due_unpublished_drafts(
+    db_session: Session,
+) -> None:
+    # Arrange: three drafts — one due & unpublished, one scheduled in the FUTURE,
+    # and one already published (post_urn set). Only the first should be posted.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    due = _seed_draft(db_session, scheduled_for=_NOW - timedelta(minutes=1))
+    _seed_draft(db_session, scheduled_for=_NOW + timedelta(hours=2))  # future → skip
+    _seed_draft(db_session, post_urn=_POST_URN)  # already published → skip
+
+    # Act.
+    published = _publisher(settings, client, mailer).poll_and_publish(db_session, _NOW)
+
+    # Assert: exactly one draft was published (the due, unpublished one).
+    assert published == 1
+    client.publish_text.assert_called_once()
+    assert due.post_urn == _POST_URN
+    assert due.state == "published"

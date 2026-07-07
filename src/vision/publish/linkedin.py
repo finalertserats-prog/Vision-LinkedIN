@@ -133,6 +133,32 @@ class LinkedInClient:
             headers = {**headers, **extra}
         return headers
 
+    # -- network guard ------------------------------------------------------
+
+    def _request(
+        self, method: str, url: str, *, context: str, **kwargs: Any
+    ) -> httpx.Response:
+        """Issue one HTTP request, mapping raw transport failures to a typed error.
+
+        WHY this wrapper: httpx raises ``TimeoutException``/``TransportError`` for a
+        hung socket or a dropped connection. On a non-idempotent write (create a
+        post, upload an image) these are UNKNOWN outcomes — LinkedIn may already
+        have created the resource — so they MUST surface as
+        :class:`TransientLinkedInError`, the typed signal the publisher treats as
+        "reconcile, do not blind-retry" (§15.4). Left raw, a timeout would either
+        crash the worker or, on the image path, block an otherwise-publishable text
+        post (BRD §13.6). ``method``/``url`` go through ``httpx.Client.request`` so
+        every caller shares one mapping point.
+        """
+        try:
+            return self._http.request(method, url, **kwargs)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            # Never log URL/query (may carry a one-time upload URL) or the token;
+            # only the error class + context travel into the message.
+            raise TransientLinkedInError(
+                f"{context}: network error ({exc.__class__.__name__})"
+            ) from exc
+
     # -- error mapping ------------------------------------------------------
 
     def _raise_for_status(self, response: httpx.Response, context: str) -> None:
@@ -289,9 +315,13 @@ class LinkedInClient:
         owner = owner_urn or self.get_member_urn(access_token)
 
         # Step 1: initialize — the ?action= query param is how Rest.li models an
-        # RPC-style action on a collection.
-        init_response = self._http.post(
+        # RPC-style action on a collection. Routed through ``_request`` so a hung
+        # socket / dropped connection becomes a typed TransientLinkedInError the
+        # image lane can degrade on, never a raw httpx error that blocks the post.
+        init_response = self._request(
+            "POST",
             _IMAGES_URL,
+            context="upload_image.initialize",
             params={"action": "initializeUpload"},
             headers=self._auth_headers(
                 access_token, {"Content-Type": "application/json"}
@@ -307,9 +337,12 @@ class LinkedInClient:
 
         # Step 2: PUT the binary. The upload endpoint still requires the bearer
         # token; it does NOT take the version/protocol headers (it's a raw blob
-        # sink), so we send auth only.
-        put_response = self._http.put(
+        # sink), so we send auth only. Routed through ``_request`` for the same
+        # transport-error mapping as step 1.
+        put_response = self._request(
+            "PUT",
             upload_url,
+            context="upload_image.put",
             content=image_bytes,
             headers={"Authorization": f"Bearer {access_token}"},
         )
@@ -368,9 +401,16 @@ class LinkedInClient:
         Shared by both publish methods. The created post's URN is returned in the
         ``x-restli-id`` response header (LinkedIn's convention for create); we
         fall back to the body ``id`` for resilience against header casing.
+
+        Routed through ``_request`` so a timeout/dropped connection on this
+        NON-idempotent create becomes a typed :class:`TransientLinkedInError` — an
+        UNKNOWN outcome the publisher reconciles rather than blindly retries
+        (§15.4 duplicate guard), instead of a raw httpx error.
         """
-        response = self._http.post(
+        response = self._request(
+            "POST",
             _POSTS_URL,
+            context=context,
             headers=self._auth_headers(
                 access_token, {"Content-Type": "application/json"}
             ),
@@ -378,6 +418,48 @@ class LinkedInClient:
         )
         self._raise_for_status(response, context)
         return _extract_post_urn(response)
+
+    # -- Posts: reconciliation lookup ---------------------------------------
+
+    def find_existing_post(
+        self, access_token: str, author_urn: str, commentary: str
+    ) -> str | None:
+        """Return the URN of a recent post by ``author_urn`` whose body matches
+        ``commentary`` exactly, or ``None`` when none exists (§15.4 duplicate guard).
+
+        WHY this exists: the Posts API is not natively idempotent and sends no
+        idempotency key, so after an UNKNOWN-outcome create (a 5xx/timeout that may
+        or may not have created the post) the worker cannot safely re-post blindly.
+        This lists the member's recent posts and matches on the exact IMMUTABLE
+        approved text, letting the worker ADOPT an already-created post instead of
+        duplicating it. Any lookup error propagates (fail-closed): the caller then
+        declines to re-post on ambiguity rather than risking a double-post.
+        """
+        response = self._request(
+            "GET",
+            _POSTS_URL,
+            context="find_existing_post",
+            params={
+                "q": "author",
+                "author": author_urn,
+                # Newest first, bounded — a duplicate from a crashed attempt is
+                # always among the most recent posts.
+                "sortBy": "LAST_MODIFIED",
+                "count": 25,
+            },
+            headers=self._auth_headers(access_token),
+        )
+        self._raise_for_status(response, "find_existing_post")
+        body = response.json() if response.content else {}
+        elements = body.get("elements", []) if isinstance(body, dict) else []
+        for element in elements:
+            # Match on the exact approved commentary — the one field guaranteed to
+            # be identical between our intended post and the one LinkedIn created.
+            if isinstance(element, dict) and element.get("commentary") == commentary:
+                urn = element.get("id")
+                if isinstance(urn, str) and urn:
+                    return urn
+        return None
 
     # -- Posts: delete ------------------------------------------------------
 
