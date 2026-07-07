@@ -519,11 +519,11 @@ def _seed_council_draft(
     return draft
 
 
-def test_council_publish_text_includes_council_block_and_single_signature(
+def test_council_publish_text_is_body_only_with_single_signature(
     db_session: Session,
 ) -> None:
     # Arrange: a council draft whose block ALREADY ends with the signature, with a
-    # text-footer signature mode so the publisher would also want to sign.
+    # text-footer signature mode so the publisher DOES want to sign the body.
     settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.TEXT_FOOTER)
     client = _mock_client()
     _seed_token(db_session)
@@ -538,12 +538,13 @@ def test_council_publish_text_includes_council_block_and_single_signature(
     # Act.
     _publisher(settings, client, Mock()).publish(db_session, draft)
 
-    # Assert: the published text carries the post, the Council block, and EXACTLY
-    # ONE 'Powered by Brahmastra' — never doubled despite the block already ending
-    # with it AND the text-footer mode being active.
+    # Assert (owner decision 2026-07-08): the PUBLISHED text is JUST the body — the
+    # Council block is NO LONGER posted (it stays in council_meta for the email).
+    # With POST_SIGNATURE_MODE=text_footer exactly ONE 'Powered by Brahmastra' is
+    # appended, and NONE of the Council bullets leak into the post.
     sent_text = client.publish_text.call_args.args[2]
     assert "one right answer" in sent_text
-    assert "Move fast, the upside is huge" in sent_text
+    assert "Move fast, the upside is huge" not in sent_text
     assert sent_text.count("Powered by Brahmastra") == 1
     # The lone signature is the final line of the post.
     assert sent_text.rstrip().endswith("Powered by Brahmastra")
@@ -552,8 +553,9 @@ def test_council_publish_text_includes_council_block_and_single_signature(
 def test_council_publish_omits_signature_when_signature_mode_off(
     db_session: Session,
 ) -> None:
-    # Arrange: signature OFF (or card_watermark) means the text carries NO textual
-    # sign-off — the block's own trailing signature is stripped so it isn't posted.
+    # Arrange: signature OFF (or card_watermark) means the published text is the BARE
+    # body — no textual sign-off, and no Council block (the watermark, if any, lives
+    # on the card — not in the copy).
     settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.OFF)
     client = _mock_client()
     _seed_token(db_session)
@@ -563,30 +565,36 @@ def test_council_publish_omits_signature_when_signature_mode_off(
     # Act.
     _publisher(settings, client, Mock()).publish(db_session, draft)
 
-    # Assert: the Council bullets are present but no Brahmastra text sign-off is
-    # added (the watermark, if any, lives on the card — not in the copy).
+    # Assert (owner decision 2026-07-08): OFF yields the bare body — no signature and
+    # no Council bullets reach LinkedIn.
     sent_text = client.publish_text.call_args.args[2]
-    assert "• A" in sent_text
+    assert sent_text.rstrip() == "We keep pretending there is one right answer."
+    assert "• A" not in sent_text
     assert "Powered by Brahmastra" not in sent_text
 
 
 # --- FINAL de-naming gate: a leaked AI name aborts publish (fail-closed) ------
 
 
-def test_publish_aborts_when_council_block_names_an_ai(db_session: Session) -> None:
-    # Arrange: a council draft whose Council block LEAKS a model name (the composer
-    # is meant to fail closed upstream, but this belt-and-braces gate guarantees the
-    # exact bytes about to hit LinkedIn are re-checked). The #1 rule: no model name.
+def test_publish_aborts_when_council_post_text_names_an_ai(db_session: Session) -> None:
+    # Arrange: a council draft whose POST_TEXT (the body that IS published) LEAKS a
+    # model name. Since the Council block is no longer published (owner decision
+    # 2026-07-08), the belt-and-braces gate re-checks the exact bytes about to hit
+    # LinkedIn — the body. The #1 rule: no model name reaches the post.
     settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.TEXT_FOOTER)
     client = _mock_client()
     _seed_token(db_session)
     block = (
         "• Move fast, the upside is huge\n"
-        "• Gemini warned the downside is irreversible\n"  # <-- leaked name
+        "• Slow down, the downside is irreversible\n"
         "• The real risk is pretending it's binary\n"
         "Powered by Brahmastra"
     )
-    draft = _seed_council_draft(db_session, council_block=block)
+    draft = _seed_council_draft(
+        db_session,
+        council_block=block,
+        post_text="Gemini warned the downside is irreversible.",  # <-- leaked name in body
+    )
 
     # Act / Assert: the gate fires — publish aborts and NOTHING is posted.
     with pytest.raises(ForbiddenNameInPost):

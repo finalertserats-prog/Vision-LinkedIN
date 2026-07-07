@@ -172,6 +172,15 @@ def _draft_state(harness: Harness, draft_id) -> str:
         session.close()
 
 
+def _draft_scheduled_for(harness: Harness, draft_id):
+    """Read the persisted ``scheduled_for`` of a draft (None if unset)."""
+    session = harness.sessionmaker()
+    try:
+        return session.get(Draft, draft_id).scheduled_for
+    finally:
+        session.close()
+
+
 def _used_count(harness: Harness) -> int:
     """Count rows in the single-use ledger."""
     session = harness.sessionmaker()
@@ -254,19 +263,22 @@ def test_post_approve_transitions_consumes_and_publishes_once(harness: Harness) 
     assert call.scheduled_for is not None  # approve enqueues for a slot
 
 
-def test_post_post_now_publishes_immediately(harness: Harness) -> None:
+def test_post_post_now_queues_for_immediate_publish(harness: Harness) -> None:
     # Arrange
     draft = _seed_draft(harness)
-    token = _mint(draft, "post_now")
+    approval = _mint(draft, "post_now")
 
     # Act — URL uses the hyphen form; the token action is post_now.
-    response = harness.client.post("/post-now", data={"token": token})
+    response = harness.client.post("/post-now", data={"token": approval})
 
-    # Assert — published now (scheduled_for is None) and published exactly once.
+    # Assert (owner decision 2026-07-08): post-now no longer publishes inline. It
+    # QUEUES the draft (scheduled, due immediately) for the vision-publisher poller;
+    # the injected web publisher is NOT called by post_now.
     assert response.status_code == 200
-    assert _draft_state(harness, draft.id) == service.STATE_PUBLISHED
-    assert len(harness.publisher.calls) == 1
-    assert harness.publisher.calls[0].scheduled_for is None
+    assert "queued to publish" in response.text.lower()
+    assert _draft_state(harness, draft.id) == service.STATE_SCHEDULED
+    assert _draft_scheduled_for(harness, draft.id) is not None
+    assert harness.publisher.calls == []
 
 
 # --- Replay / invalid / expired --------------------------------------------

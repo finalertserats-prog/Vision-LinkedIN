@@ -534,16 +534,22 @@ def post_now(
     re-publishes any draft with an unset ``post_urn`` idempotently.
     """
     draft = load_draft(session, verified.draft_id)
+    # "Post now" QUEUES the draft due immediately (scheduled_for = now) so the
+    # vision-publisher poller publishes it — with the correct council-text assembly
+    # (signature/format) and real idempotency. The web MUST NOT publish inline: its
+    # injected publisher is a mock, which previously marked the draft 'published'
+    # WITHOUT posting and showed a false "sent to LinkedIn". This makes post-now
+    # consistent with 'Approve' (both queue for the poller); the only difference is
+    # the due time (now vs the next slot). ``publisher`` is intentionally unused now.
     _consume_and_transition(
         session,
         draft=draft,
         verified=verified,
         allowed_from=_POST_NOW_FROM,
-        new_state=STATE_PUBLISHED,
+        new_state=STATE_SCHEDULED,
+        extra_values={"scheduled_for": datetime.now(timezone.utc)},
     )
     draft_id = str(draft.id)
-    post_text = draft.post_text or ""
-    image_path = draft.image_path
     _audit(
         session,
         draft_id=draft_id,
@@ -552,23 +558,15 @@ def post_now(
         actor_ip=actor_ip,
         meta={},
     )
-    # Durable commit BEFORE publishing (transactional outbox, §10.2 / §22.9).
     session.commit()
-    ref = _publish_after_commit(
-        publisher,
-        draft_id=draft_id,
-        text=post_text,
-        image_path=image_path,
-        scheduled_for=None,  # None ⇒ publish immediately
-    )
-    _log.info("draft posted now", extra={"draft_id": draft_id})
+    _log.info("draft queued for immediate publish", extra={"draft_id": draft_id})
     return ActionResult(
         action="post_now",
         draft_id=draft_id,
-        new_state=STATE_PUBLISHED,
-        heading="Post published",
-        message="Your post has been sent to LinkedIn.",
-        publisher_ref=ref,
+        new_state=STATE_SCHEDULED,
+        heading="Queued to publish",
+        message="Approved — your post will go live within a minute.",
+        publisher_ref=None,
     )
 
 

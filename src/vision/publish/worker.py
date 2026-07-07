@@ -570,23 +570,18 @@ class LinkedInPublisher:
         (``text_footer``/``both``); ``off``/``card_watermark`` leave the sign-off to
         the card, so the council text is body + block with NO doubled signature.
         """
-        meta = getattr(draft, "council_meta", None) or {}
         post_text = (draft.post_text or "").rstrip()
-        # The block is de-named upstream (only 'Powered by Brahmastra' attributes it).
-        block = _strip_brahmastra_signature(str(meta.get("council_block") or ""))
-
-        parts = [post_text]
-        if block:
-            # A blank line between the post and the Council block (LinkedIn renders
-            # two newlines as a visible gap).
-            parts.append(block)
-
+        # Owner decision (2026-07-08): the public LinkedIn post is JUST the body —
+        # NO Council block AND NO 'Powered by Brahmastra' sign-off by default, so the
+        # post reads as authored by the owner (a visible signature signals "an AI
+        # wrote this" and undercuts authenticity — BRD D9). The Council block stays
+        # in ``council_meta`` for the approval email only. The signature remains
+        # available as an opt-in: it is appended ONLY when POST_SIGNATURE_MODE selects
+        # a text footer (``text_footer``/``both``); ``off``/``card_watermark`` = clean post.
         mode = self._settings.post_signature_mode
         if mode in {SignatureMode.TEXT_FOOTER, SignatureMode.BOTH}:
-            # Exactly one attribution line, always the owner-approved wording.
-            parts.append(_BRAHMASTRA_SIGNATURE)
-
-        return "\n\n".join(p for p in parts if p)
+            return f"{post_text}\n\n{_BRAHMASTRA_SIGNATURE}"
+        return post_text
 
     def _load_image_bytes(self, draft: Draft) -> bytes | None:
         """Return the approved image bytes, or ``None`` to fall back to text-only.
