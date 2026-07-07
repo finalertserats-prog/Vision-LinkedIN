@@ -59,7 +59,12 @@ _log = logging.getLogger(__name__)
 # The draft states relevant to the approval loop. Kept as plain string
 # constants matching ``drafts.state`` (default "new") so the values stay
 # human-readable in the DB and portable across SQLite/Postgres.
-STATE_NEW = "new"  # freshly generated, awaiting the owner's decision
+STATE_NEW = "new"  # legacy awaiting state (some tests seed this)
+# The CANONICAL awaiting-the-owner's-decision state per BRD §10.4. The vision-daily
+# and vision-council CLIs create drafts in THIS state, so the approval actions MUST
+# fire from it — the original {STATE_NEW}-only guards silently rejected every real
+# CLI-created draft with a StateConflict (caught in the first live approval test).
+STATE_PENDING_APPROVAL = "pending_approval"
 STATE_SCHEDULED = "scheduled"  # approved; queued for the next publish slot
 STATE_PUBLISHED = "published"  # published now (post-now) — terminal
 STATE_REJECTED = "rejected"  # discarded by the owner — terminal
@@ -70,10 +75,10 @@ STATE_REJECTED = "rejected"  # discarded by the owner — terminal
 # is already scheduled/published/rejected is NOT re-actionable by these links
 # (defence against double-approval and against a replayed link that somehow
 # passed the nonce check).
-_APPROVE_FROM: frozenset[str] = frozenset({STATE_NEW})
-_POST_NOW_FROM: frozenset[str] = frozenset({STATE_NEW, STATE_SCHEDULED})
-_REJECT_FROM: frozenset[str] = frozenset({STATE_NEW, STATE_SCHEDULED})
-_EDIT_FROM: frozenset[str] = frozenset({STATE_NEW})
+_APPROVE_FROM: frozenset[str] = frozenset({STATE_NEW, STATE_PENDING_APPROVAL})
+_POST_NOW_FROM: frozenset[str] = frozenset({STATE_NEW, STATE_PENDING_APPROVAL, STATE_SCHEDULED})
+_REJECT_FROM: frozenset[str] = frozenset({STATE_NEW, STATE_PENDING_APPROVAL, STATE_SCHEDULED})
+_EDIT_FROM: frozenset[str] = frozenset({STATE_NEW, STATE_PENDING_APPROVAL})
 
 
 # --- Publisher port (Phase 2: MOCKED) --------------------------------------

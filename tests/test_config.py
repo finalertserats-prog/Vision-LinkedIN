@@ -8,6 +8,7 @@ from __future__ import annotations
 from vision.config import (
     BrahmastraMode,
     PublishMode,
+    Settings,
     SignatureMode,
     VisionEnv,
     get_settings,
@@ -15,10 +16,10 @@ from vision.config import (
 
 
 def test_settings_defaults_load_with_safe_dev_values() -> None:
-    # Arrange: clear the lru_cache so we read a fresh instance (not a cached one
-    # left by another test), then act.
-    get_settings.cache_clear()
-    settings = get_settings()
+    # Load settings IGNORING any real .env (``_env_file=None``) so this asserts the
+    # built-in BRD-Appendix-A defaults, not whatever the developer's live .env holds
+    # (which, once real creds/modes are filled in for go-live, would fail this).
+    settings = Settings(_env_file=None)
 
     # Assert: the dev-safe defaults from BRD Appendix A are present and typed.
     assert settings.vision_env is VisionEnv.DRY_RUN
