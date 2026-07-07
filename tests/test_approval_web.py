@@ -215,6 +215,25 @@ def test_get_edit_renders_editable_page_with_char_counter(harness: Harness) -> N
     assert _draft_state(harness, draft.id) == service.STATE_NEW
 
 
+def test_get_overrule_verifies_and_renders_labelled_edit_page(harness: Harness) -> None:
+    # Arrange: a council OVERRULE link is an edit-flow variant — its signed token
+    # must VERIFY (proving 'overrule' is in the token allowlist) and its GET must
+    # render the same editable page, labelled so the owner knows it's an override.
+    draft = _seed_draft(harness)
+    token = _mint(draft, "overrule")
+
+    # Act
+    response = harness.client.get("/overrule", params={"token": token})
+
+    # Assert — verified (200, not the generic 400 a bad action would give), the
+    # editable textarea is present, and the override prompt labels the page.
+    assert response.status_code == 200
+    assert "<textarea" in response.text
+    assert "Add your override:" in response.text
+    # A GET never mutates state (threat-model invariant).
+    assert _draft_state(harness, draft.id) == service.STATE_NEW
+
+
 # --- POST approve: transition + consume + publish once ----------------------
 def test_post_approve_transitions_consumes_and_publishes_once(harness: Harness) -> None:
     # Arrange

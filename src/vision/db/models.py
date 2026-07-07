@@ -195,6 +195,31 @@ class Draft(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         JSONType, nullable=True, doc="Per-pass model + version trace."
     )
 
+    # --- Content-mode routing (BRD §5 evolution / council-content-vision) ---
+    # WHICH content pipeline produced this draft. Defaults to 'news' — the daily
+    # ingest→curate→synthesise path that has always populated this table — so every
+    # pre-existing row reads back as a news draft with no data migration of values.
+    # The council path stamps 'council' so downstream routing (email copy, publish,
+    # analytics) can branch on the ORIGIN of a draft WITHOUT sniffing its shape.
+    # Kept a plain Text column (not an enum) so it stays portable across SQLite/
+    # Postgres and a future third mode needs no DDL churn (config-over-code, §22.6).
+    content_mode: Mapped[str] = mapped_column(
+        Text, nullable=False, default="news",
+        doc="Producing pipeline: 'news' (daily) | 'council' (§5).",
+    )
+    # The council's provenance blob — the un-published raw deliberation plus the
+    # editorial metadata that produced the public post. Nullable because ONLY
+    # council drafts carry it (a news draft leaves it NULL). Portable JSON (not
+    # Postgres JSONB) so it round-trips on both backends. Shape mirrors what
+    # ``vision.council.engine.run_council`` returns:
+    #   {topic, format, situation, council_block, transcript}
+    # — stored for audit/provenance (§13.0) and NEVER published (the de-named
+    # ``post_text`` is the only thing that ships).
+    council_meta: Mapped[dict | None] = mapped_column(
+        JSONType, nullable=True,
+        doc="Council provenance {topic, format, situation, council_block, transcript}.",
+    )
+
     # --- Image lane (§13.6 data-model additions) ---------------------------
     # Decision outcome for the visual lane.
     image_type: Mapped[str] = mapped_column(

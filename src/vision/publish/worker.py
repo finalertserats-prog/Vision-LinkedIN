@@ -67,6 +67,7 @@ from tenacity import (
 from vision.approval.state_errors import TransitionConflict
 from vision.approval.state_machine import DraftState, transition
 from vision.config import Settings, SignatureMode, VisionEnv, get_settings
+from vision.council.compose import find_forbidden_name
 from vision.db.models import AuditLog, Draft, OAuthToken
 from vision.logging_setup import get_logger
 from vision.mailer.sender import EmailSender, get_sender
@@ -124,6 +125,17 @@ _DEFAULT_LEASE_TTL = timedelta(minutes=10)
 # being silently lost, and the owner is notified (ISSUE 4 reaper/alert).
 _DEFAULT_STUCK_AFTER = timedelta(hours=1)
 
+# --- Council publishing (§5 evolution) --------------------------------------
+# The sentinel ``content_mode`` marking a council-generated draft. A constant so
+# the branch that assembles the extra Council block is auditable in one place.
+_COUNCIL_MODE = "council"
+
+# The ONLY attribution a council post ever carries (all three voices are de-named
+# upstream — see the council composer). It is the exact, owner-approved wording and
+# must appear EXACTLY ONCE in the published text, so it is a single constant that
+# both the de-dup strip and the re-append below share.
+_BRAHMASTRA_SIGNATURE = "Powered by Brahmastra"
+
 class PublisherError(Exception):
     """Base for publisher-layer failures that are not raw LinkedIn errors."""
 
@@ -147,6 +159,23 @@ class ReauthRequired(PublisherError):
     The approved draft is deliberately KEPT (not dead-lettered) so it publishes
     automatically once the owner re-authorises (BRD §15.4 401).
     """
+
+
+class ForbiddenNameInPost(PublisherError):
+    """The FINAL LinkedIn text names an AI/model/vendor — publish FAILS CLOSED.
+
+    The #1 published-text rule is that NO model name reaches LinkedIn. The council
+    composer already fails closed on a leak, but this is the belt-and-braces gate
+    on the EXACT bytes about to be posted (body + Council block + signature +
+    staging marker) — so an edited draft, a pre-composer draft, or any future path
+    that assembles text is re-checked before a single network call. Carries the
+    offending ``match`` (token only) for the alert; the surrounding text is never
+    logged. Fatal by design — a leak aborts publish rather than shipping.
+    """
+
+    def __init__(self, match: str) -> None:
+        self.match = match
+        super().__init__(f"final post text names a forbidden AI/model: {match!r}")
 
 
 def encrypt_token(
@@ -229,6 +258,27 @@ def _post_url_from_urn(post_urn: str) -> str:
     the owner straight to their live post.
     """
     return f"https://www.linkedin.com/feed/update/{post_urn}/"
+
+
+def _strip_brahmastra_signature(block: str) -> str:
+    """Return ``block`` with a trailing 'Powered by Brahmastra' line removed.
+
+    WHY: the council composer bakes the signature into the Council block, but the
+    publisher re-appends exactly one signature under ``POST_SIGNATURE_MODE`` control
+    — so the block must be handed on WITHOUT its own trailing sign-off or the post
+    would be signed twice. Case-insensitive on the final non-empty line only; if the
+    block does not end with the signature it is returned unchanged (trimmed). Builds
+    a new string — the input is never mutated (§22 immutability).
+    """
+    lines = block.rstrip().splitlines()
+    # Drop trailing blank lines, then a final signature line if present.
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[-1].strip().casefold() == _BRAHMASTRA_SIGNATURE.casefold():
+        lines.pop()
+        while lines and not lines[-1].strip():
+            lines.pop()
+    return "\n".join(lines).rstrip()
 
 
 class LinkedInPublisher:
@@ -454,22 +504,89 @@ class LinkedInPublisher:
     def _compose_text(self, draft: Draft) -> str:
         """Assemble the final post text: body + optional footer + staging marker.
 
-        The Brahmastra signature footer is appended only when
-        ``POST_SIGNATURE_MODE`` selects a text footer (D9). In ``staging`` the
-        text is clearly marked as an auto-deleted test so that, if the delete ever
-        fails, the stray post is unmistakably identifiable.
+        A COUNCIL draft (``content_mode == 'council'``) is assembled differently:
+        the post body, then the unnamed Council block, then a SINGLE
+        'Powered by Brahmastra' attribution — see :meth:`_compose_council_text`. A
+        news draft keeps its historic behaviour: the ``POST_SIGNATURE_TEXT`` footer
+        is appended only when ``POST_SIGNATURE_MODE`` selects a text footer (D9). In
+        ``staging`` the text is clearly marked as an auto-deleted test so that, if
+        the delete ever fails, the stray post is unmistakably identifiable.
         """
-        text = draft.post_text or ""
-        mode = self._settings.post_signature_mode
-        if (
-            mode in {SignatureMode.TEXT_FOOTER, SignatureMode.BOTH}
-            and self._settings.post_signature_text
-        ):
-            # Two newlines keep the footer visually separate from the body.
-            text = f"{text}\n\n{self._settings.post_signature_text}"
+        if self._is_council(draft):
+            text = self._compose_council_text(draft)
+        else:
+            text = draft.post_text or ""
+            mode = self._settings.post_signature_mode
+            if (
+                mode in {SignatureMode.TEXT_FOOTER, SignatureMode.BOTH}
+                and self._settings.post_signature_text
+            ):
+                # Two newlines keep the footer visually separate from the body.
+                text = f"{text}\n\n{self._settings.post_signature_text}"
+
+        # FINAL de-naming gate — FAIL CLOSED on the exact content about to be
+        # published, BEFORE the VISION-internal staging marker is prepended (the
+        # marker is our own text, not user/model content). WHY here and not only in
+        # the composer: this is the single choke point every draft (council, news,
+        # or human-edited) flows through on its way to LinkedIn, so a forbidden
+        # name can never slip past — regardless of how the text was assembled.
+        leak = find_forbidden_name(text)
+        if leak is not None:
+            _log.error(
+                "final post text names a forbidden AI/model; aborting publish",
+                extra={"draft_id": str(getattr(draft, "id", "")), "forbidden_match": leak},
+            )
+            raise ForbiddenNameInPost(leak)
+
         if self._settings.vision_env is VisionEnv.STAGING:
             text = f"[VISION STAGING TEST — auto-deleted]\n\n{text}"
         return text
+
+    @staticmethod
+    def _is_council(draft: Draft) -> bool:
+        """Return whether ``draft`` is a council draft with usable council meta.
+
+        Read defensively (``getattr``) so a draft/ORM row that predates the
+        ``content_mode`` / ``council_meta`` columns is simply treated as a news
+        draft rather than raising (the mailer applies the same guard). Requires BOTH
+        the council content_mode AND a non-empty ``council_meta``: without the meta
+        there is no Council block to assemble, so we fall back to the news path.
+        """
+        mode = getattr(draft, "content_mode", None)
+        meta = getattr(draft, "council_meta", None)
+        return mode == _COUNCIL_MODE and isinstance(meta, dict) and bool(meta)
+
+    def _compose_council_text(self, draft: Draft) -> str:
+        """Assemble a council post: body + Council block + ONE Brahmastra sign-off.
+
+        The final LinkedIn text is ``post_text`` + a blank line + the unnamed
+        'Council' block + a single ``Powered by Brahmastra`` line. WHY the explicit
+        de-dup: the council composer already ends its Council block with
+        'Powered by Brahmastra', so blindly appending the signature would sign the
+        post TWICE. We therefore strip any trailing signature from the block first
+        and re-append exactly one — honouring "appears exactly once" regardless of
+        whether the upstream block carried it. ``POST_SIGNATURE_MODE`` is respected:
+        the textual attribution is added only when the mode selects a text footer
+        (``text_footer``/``both``); ``off``/``card_watermark`` leave the sign-off to
+        the card, so the council text is body + block with NO doubled signature.
+        """
+        meta = getattr(draft, "council_meta", None) or {}
+        post_text = (draft.post_text or "").rstrip()
+        # The block is de-named upstream (only 'Powered by Brahmastra' attributes it).
+        block = _strip_brahmastra_signature(str(meta.get("council_block") or ""))
+
+        parts = [post_text]
+        if block:
+            # A blank line between the post and the Council block (LinkedIn renders
+            # two newlines as a visible gap).
+            parts.append(block)
+
+        mode = self._settings.post_signature_mode
+        if mode in {SignatureMode.TEXT_FOOTER, SignatureMode.BOTH}:
+            # Exactly one attribution line, always the owner-approved wording.
+            parts.append(_BRAHMASTRA_SIGNATURE)
+
+        return "\n\n".join(p for p in parts if p)
 
     def _load_image_bytes(self, draft: Draft) -> bytes | None:
         """Return the approved image bytes, or ``None`` to fall back to text-only.

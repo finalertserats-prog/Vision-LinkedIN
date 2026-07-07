@@ -34,7 +34,11 @@ from vision.config import Settings, SignatureMode, VisionEnv, get_settings
 from vision.db.models import Draft, OAuthToken
 from vision.publish.errors import NeedsReauth, RateLimited, TransientLinkedInError
 from vision.publish.linkedin import LinkedInClient
-from vision.publish.worker import LinkedInPublisher, encrypt_token
+from vision.publish.worker import (
+    ForbiddenNameInPost,
+    LinkedInPublisher,
+    encrypt_token,
+)
 
 # --- Deterministic test constants ------------------------------------------
 # A fixed reference "now" so every scheduled_for comparison is fully deterministic.
@@ -481,6 +485,131 @@ def test_staging_marks_post_text_as_auto_deleted(db_session: Session) -> None:
     # stray post (if a delete ever fails) is unmistakable.
     sent_text = client.publish_text.call_args.args[2]
     assert "STAGING TEST" in sent_text
+
+
+# --- Council publish: post + Council block + a SINGLE Brahmastra sign-off ----
+#
+# WHY set the council fields as instance attributes (not constructor kwargs): the
+# ``content_mode`` / ``council_meta`` columns are owned by a separate agent's
+# models migration. The worker reads them defensively via ``getattr`` on the
+# in-memory draft, so stamping them post-construction exercises the assembly path
+# hermetically WITHOUT coupling this test to the DB schema/migration.
+
+
+def _seed_council_draft(
+    session: Session,
+    *,
+    council_block: str,
+    post_text: str = "We keep pretending there is one right answer.",
+) -> Draft:
+    """Insert a council draft (content_mode + council_meta) and return it."""
+    draft = _seed_draft(session)
+    draft.post_text = post_text
+    # Set the council fields as plain instance attributes (see module note above).
+    draft.content_mode = "council"
+    draft.council_meta = {
+        "topic": "unexplainable AI in hospitals",
+        "format": "show_the_split",
+        "situation": "disagreed",
+        "council_block": council_block,
+        "transcript": {"Gemini": {"round1": "x", "round2": "y"}},
+    }
+    session.add(draft)
+    session.commit()
+    return draft
+
+
+def test_council_publish_text_includes_council_block_and_single_signature(
+    db_session: Session,
+) -> None:
+    # Arrange: a council draft whose block ALREADY ends with the signature, with a
+    # text-footer signature mode so the publisher would also want to sign.
+    settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.TEXT_FOOTER)
+    client = _mock_client()
+    _seed_token(db_session)
+    block = (
+        "• Move fast, the upside is huge\n"
+        "• Slow down, the downside is irreversible\n"
+        "• The real risk is pretending it's binary\n"
+        "Powered by Brahmastra"
+    )
+    draft = _seed_council_draft(db_session, council_block=block)
+
+    # Act.
+    _publisher(settings, client, Mock()).publish(db_session, draft)
+
+    # Assert: the published text carries the post, the Council block, and EXACTLY
+    # ONE 'Powered by Brahmastra' — never doubled despite the block already ending
+    # with it AND the text-footer mode being active.
+    sent_text = client.publish_text.call_args.args[2]
+    assert "one right answer" in sent_text
+    assert "Move fast, the upside is huge" in sent_text
+    assert sent_text.count("Powered by Brahmastra") == 1
+    # The lone signature is the final line of the post.
+    assert sent_text.rstrip().endswith("Powered by Brahmastra")
+
+
+def test_council_publish_omits_signature_when_signature_mode_off(
+    db_session: Session,
+) -> None:
+    # Arrange: signature OFF (or card_watermark) means the text carries NO textual
+    # sign-off — the block's own trailing signature is stripped so it isn't posted.
+    settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.OFF)
+    client = _mock_client()
+    _seed_token(db_session)
+    block = "• A\n• B\n• C\nPowered by Brahmastra"
+    draft = _seed_council_draft(db_session, council_block=block)
+
+    # Act.
+    _publisher(settings, client, Mock()).publish(db_session, draft)
+
+    # Assert: the Council bullets are present but no Brahmastra text sign-off is
+    # added (the watermark, if any, lives on the card — not in the copy).
+    sent_text = client.publish_text.call_args.args[2]
+    assert "• A" in sent_text
+    assert "Powered by Brahmastra" not in sent_text
+
+
+# --- FINAL de-naming gate: a leaked AI name aborts publish (fail-closed) ------
+
+
+def test_publish_aborts_when_council_block_names_an_ai(db_session: Session) -> None:
+    # Arrange: a council draft whose Council block LEAKS a model name (the composer
+    # is meant to fail closed upstream, but this belt-and-braces gate guarantees the
+    # exact bytes about to hit LinkedIn are re-checked). The #1 rule: no model name.
+    settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.TEXT_FOOTER)
+    client = _mock_client()
+    _seed_token(db_session)
+    block = (
+        "• Move fast, the upside is huge\n"
+        "• Gemini warned the downside is irreversible\n"  # <-- leaked name
+        "• The real risk is pretending it's binary\n"
+        "Powered by Brahmastra"
+    )
+    draft = _seed_council_draft(db_session, council_block=block)
+
+    # Act / Assert: the gate fires — publish aborts and NOTHING is posted.
+    with pytest.raises(ForbiddenNameInPost):
+        _publisher(settings, client, Mock()).publish(db_session, draft)
+    client.publish_text.assert_not_called()
+    client.publish_with_image.assert_not_called()
+
+
+def test_publish_aborts_when_post_body_names_a_vendor(db_session: Session) -> None:
+    # Arrange: a plain (news) draft whose BODY leaks a lowercase vendor variant —
+    # proves the gate covers every content path, not just council drafts.
+    settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.OFF)
+    client = _mock_client()
+    _seed_token(db_session)
+    draft = _seed_draft(db_session)
+    draft.post_text = "We asked chatgpt to draft this and it nailed the tone."
+    db_session.add(draft)
+    db_session.commit()
+
+    # Act / Assert: leaked vendor name → publish aborts, nothing posted.
+    with pytest.raises(ForbiddenNameInPost):
+        _publisher(settings, client, Mock()).publish(db_session, draft)
+    client.publish_text.assert_not_called()
 
 
 # --- poll_and_publish: only approved, due, un-published drafts are posted ---

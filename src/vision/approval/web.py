@@ -64,7 +64,21 @@ _PATH_TO_ACTION: dict[str, str] = {
     "reject": "reject",
     "edit": "edit",
     "post-now": "post_now",
+    # 'overrule' is a COUNCIL-only action wired as an EDIT-flow VARIANT (BRD §5):
+    # the owner supplies a one-line counter-take that overrides the council's
+    # synthesised post. It reuses the edit page + edit_apply machinery verbatim
+    # (no new endpoint) — the only difference is the labelled prompt shown on GET.
+    "overrule": "overrule",
 }
+
+# Actions that are handled through the EDIT machinery (same edit page + apply
+# path). Grouping them here keeps the "overrule is an edit variant" decision in one
+# auditable place rather than scattered ``action in {...}`` checks.
+_EDIT_LIKE_ACTIONS: frozenset[str] = frozenset({"edit", "overrule"})
+
+# The prompt shown on the overrule edit page so the owner knows this is an
+# override, not an ordinary edit (labelled per BRD §5 / task item 2).
+_OVERRULE_PROMPT = "Add your override:"
 
 # A session factory is any zero-arg callable returning a context manager that
 # yields a Session (commit-on-success). Prod uses ``get_session``; tests inject
@@ -248,7 +262,9 @@ def create_app(
                 settings=app_settings,
                 actor_ip=actor_ip,
             )
-        # action == "edit": parse the edited fields from the form and apply.
+        # action in {edit, overrule}: BOTH parse the edited/override fields from the
+        # form and apply through the SAME edit machinery — an overrule is just an
+        # edit whose new text is the owner's counter-take (no separate service call).
         return service.edit_apply(
             session,
             verified=verified,
@@ -319,13 +335,16 @@ def create_app(
             hashtags = list(draft.hashtags or [])
 
         action_url = f"/{path_action}"
-        if action == "edit":
+        if action in _EDIT_LIKE_ACTIONS:
+            # Overrule reuses the edit page verbatim; only the labelled prompt
+            # differs so the owner knows this edit overrides the council's post.
             page = edit_page.render_edit_page(
                 post_text=post_text,
                 hashtags=hashtags,
                 token=token,
                 action_url=action_url,
                 errors=None,
+                prompt=_OVERRULE_PROMPT if action == "overrule" else None,
                 palette=palette,
             )
             return HTMLResponse(page)
@@ -403,6 +422,7 @@ def create_app(
                     token=token,
                     action_url=f"/{path_action}",
                     errors=exc.problems,
+                    prompt=_OVERRULE_PROMPT if action == "overrule" else None,
                     palette=palette,
                 ),
                 status_code=400,

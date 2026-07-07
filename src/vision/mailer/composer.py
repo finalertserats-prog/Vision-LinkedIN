@@ -35,15 +35,34 @@ from vision.mailer import theme
 
 log = logging.getLogger(__name__)
 
-# The four actions the approval email offers, in the BRD's display order, paired
-# with their button label and whether they are the primary (navy) CTA. Sourced
-# from Appendix B: "Approve & schedule (09:00) · Post now · Edit · Reject".
+# The four actions the news approval email offers, in the BRD's display order,
+# paired with their button label and whether they are the primary (navy) CTA.
+# Sourced from Appendix B: "Approve & schedule (09:00) · Post now · Edit · Reject".
 _ACTION_ORDER: tuple[tuple[str, str, bool], ...] = (
     ("approve", "Approve & schedule 09:00", True),
     ("post_now", "Post now", False),
     ("edit", "Edit", False),
     ("reject", "Reject", False),
 )
+
+# A COUNCIL draft offers one EXTRA action — "Overrule" — so the owner can supply a
+# one-line counter-take that overrides the council's synthesised post. WHY it sits
+# between Edit and Reject: it is an edit-flow *variant* (it reuses the edit
+# machinery, not a new endpoint — see ``approval/tokens.py`` VALID_ACTIONS and the
+# edit page), so it reads naturally next to Edit. It is never primary — the owner
+# should approve the council's own synthesis by default, not reflexively overrule.
+_COUNCIL_ACTION_ORDER: tuple[tuple[str, str, bool], ...] = (
+    ("approve", "Approve & schedule 09:00", True),
+    ("post_now", "Post now", False),
+    ("edit", "Edit", False),
+    ("overrule", "Overrule", False),
+    ("reject", "Reject", False),
+)
+
+# The sentinel ``content_mode`` value that marks a draft as council-generated
+# (BRD §5 evolution / council-content-vision). Anything else renders the standard
+# news email. A constant, not a scattered literal, so the branch is auditable.
+_COUNCIL_MODE = "council"
 
 
 @dataclass(frozen=True)
@@ -76,6 +95,14 @@ class _DraftLike(Protocol):
     token_expires_at: datetime | None
     image_type: str
     image_path: str | None
+    # --- Council fields (§5 evolution) -------------------------------------
+    # These live on the ORM ``Draft`` for council-generated drafts. They are
+    # declared ``| None`` / optional here because a NEWS draft has ``content_mode``
+    # != 'council' and no ``council_meta``; the composer reads them defensively
+    # (via getattr, tolerating an older ORM row that predates the columns) so this
+    # module never hard-couples to the DB migration that adds them.
+    content_mode: str | None
+    council_meta: dict[str, Any] | None
 
 
 def _fmt_date(when: datetime, settings: Settings) -> str:
@@ -268,6 +295,113 @@ def _sources_html(sources: Sequence[SourceRef]) -> str:
     return f'<ol style="margin:0;padding-left:20px;color:{theme.TEXT_SECOND};">{"".join(items)}</ol>'
 
 
+# --- Council rendering (§5 evolution) ---------------------------------------
+
+
+def _is_council(draft: _DraftLike) -> bool:
+    """Return whether ``draft`` is a council draft that should render the council email.
+
+    Read defensively (``getattr``) so a draft object — or an older ORM row — that
+    predates the ``content_mode`` / ``council_meta`` columns is simply treated as a
+    normal news draft rather than raising. Both a council content_mode AND a
+    non-empty ``council_meta`` are required: without the meta there is nothing
+    council-specific to render, so we fall back to the standard email (fail-safe).
+    """
+    mode = getattr(draft, "content_mode", None)
+    meta = getattr(draft, "council_meta", None)
+    return mode == _COUNCIL_MODE and isinstance(meta, Mapping) and bool(meta)
+
+
+def _council_block_html(council_block: str) -> str:
+    """Render the 3 unnamed viewpoints (+ 'Powered by Brahmastra') as escaped HTML.
+
+    The block is model-derived text, so it is HTML-escaped in full before it reaches
+    the body (§22 / threat model §4 — no draft/model text is ever trusted as markup).
+    ``white-space:pre-wrap`` preserves the bullet lines exactly as the council editor
+    wrote them without us re-parsing (and possibly mis-splitting) them. The block is
+    de-named upstream (only 'Powered by Brahmastra' attributes it), so no AI model
+    name can appear here.
+    """
+    return (
+        f'<div style="color:{theme.TEXT_MUTED};font-size:11px;text-transform:uppercase;'
+        f'letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">Council</div>'
+        f'<pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;'
+        f"font-family:{theme._SANS};font-size:14px;line-height:1.55;"
+        f'color:{theme.TEXT_PRIMARY};">{_html.escape(council_block)}</pre>'
+    )
+
+
+def _raw_debate_html(transcript: Any) -> str:
+    """Render the raw debate as a COLLAPSED, fully-escaped ``<details>`` peek.
+
+    WHY collapsed: the un-edited transcript is provenance the owner can open on
+    demand, never the headline — it stays folded so the email leads with the post,
+    not the debate. The transcript may be a nested ``{voice: {round1, round2}}`` dict
+    or a plain string; either way EVERY value is HTML-escaped before rendering, so a
+    voice that emitted markup (or an injected string) can never break out of the
+    body. If the transcript is missing/empty we render nothing (no empty widget).
+
+    NOTE: the transcript is internal provenance and MAY reference the underlying
+    voices; it is shown only in this owner-facing review peek and is NEVER part of
+    the published post (the post + Council block are de-named upstream).
+    """
+    if not transcript:
+        return ""
+
+    lines: list[str] = []
+    if isinstance(transcript, Mapping):
+        # Structured {voice: {"round1": ..., "round2": ...}} — render each round on
+        # its own escaped line so the debate reads in order.
+        for voice, rounds in transcript.items():
+            safe_voice = _html.escape(str(voice))
+            if isinstance(rounds, Mapping):
+                for label, text in rounds.items():
+                    lines.append(
+                        f"<div style=\"margin:6px 0;\"><strong>{safe_voice}"
+                        f" · {_html.escape(str(label))}</strong>: "
+                        f"{_html.escape(str(text))}</div>"
+                    )
+            else:
+                lines.append(
+                    f'<div style="margin:6px 0;"><strong>{safe_voice}</strong>: '
+                    f"{_html.escape(str(rounds))}</div>"
+                )
+    else:
+        # A plain-string transcript: escape it whole and preserve its line breaks.
+        lines.append(
+            f'<pre style="margin:0;white-space:pre-wrap;word-wrap:break-word;'
+            f'font-size:12px;color:{theme.TEXT_SECOND};">{_html.escape(str(transcript))}</pre>'
+        )
+
+    body = "".join(lines)
+    # A native <details>/<summary> is the most portable "collapsible" primitive;
+    # clients that ignore it simply show the content inline (still safe, still
+    # escaped) — the peek is never load-bearing.
+    return (
+        '<details style="margin:0;">'
+        f'<summary style="cursor:pointer;color:{theme.TEXT_MUTED};font-size:11px;'
+        'text-transform:uppercase;letter-spacing:1.5px;font-weight:700;">'
+        "Raw debate (peek)</summary>"
+        f'<div style="margin-top:10px;font-size:13px;color:{theme.TEXT_SECOND};">{body}</div>'
+        "</details>"
+    )
+
+
+def _council_text_sections(meta: Mapping[str, Any]) -> list[str]:
+    """Plain-text council sections: the Council block then a raw-debate note.
+
+    The plain-text fallback shows the same Council block (already de-named, carrying
+    only 'Powered by Brahmastra') and points to the HTML peek for the raw debate,
+    rather than dumping the whole transcript into every mail client. Tolerant of a
+    missing block (renders a placeholder, never raises).
+    """
+    council_block = str(meta.get("council_block") or "").strip()
+    sections: list[str] = ["", "[ COUNCIL ]"]
+    sections.append(council_block or "(council block unavailable)")
+    sections += ["", "[ RAW DEBATE ]", "(collapsible in the HTML email)"]
+    return sections
+
+
 def compose_approval_email(
     draft: _DraftLike,
     sources: Sequence[SourceRef],
@@ -303,12 +437,24 @@ def compose_approval_email(
     char_count = len(post_text)
     quality_lines = _quality_lines(draft.quality_report)
 
+    # A council draft renders an extra Council block + raw-debate peek + an
+    # Overrule action; everything else renders the standard news email. Resolved
+    # ONCE so the text body, HTML body, and button set all agree.
+    is_council = _is_council(draft)
+    council_meta: Mapping[str, Any] = (
+        getattr(draft, "council_meta", None) or {}
+    ) if is_council else {}
+    action_order = _COUNCIL_ACTION_ORDER if is_council else _ACTION_ORDER
+
     # --- Plain-text body (the fallback every client can read) ---------------
     text_sections: list[str] = [
         f"[ PROPOSED POST — {char_count:,} chars ]",
         post_text,
         "",
     ]
+    if is_council:
+        # POST first, then the Council block + a pointer to the collapsible debate.
+        text_sections += _council_text_sections(council_meta)
     has_image = bool(draft.image_path) and draft.image_type != "none"
     if has_image:
         text_sections += [f"[ IMAGE — type: {draft.image_type} ]", "(inline preview in the HTML email)", ""]
@@ -318,7 +464,7 @@ def compose_approval_email(
     text_sections += [
         "",
         "[ ACTIONS ]",
-        *[f"{label}: {signed_links[action]}" for action, label, _ in _ACTION_ORDER],
+        *[f"{label}: {signed_links[action]}" for action, label, _ in action_order],
         "",
         f"Run {_short_id(draft.run_id)} · Links expire {_fmt_expiry(draft.token_expires_at, cfg)} today.",
     ]
@@ -336,6 +482,16 @@ def compose_approval_email(
         f'color:{theme.TEXT_PRIMARY};">{_html.escape(post_text)}</pre>'
     )
     body_rows.append(_panel_row(_inset(post_block)))
+
+    # COUNCIL — for a council draft, the 3 unnamed viewpoints then the collapsible
+    # raw-debate peek sit directly under the POST (Appendix: post → council → debate).
+    if is_council:
+        council_block = str(council_meta.get("council_block") or "")
+        if council_block.strip():
+            body_rows.append(_panel_row(_inset(_council_block_html(council_block))))
+        raw_debate = _raw_debate_html(council_meta.get("transcript"))
+        if raw_debate:
+            body_rows.append(_panel_row(_inset(raw_debate)))
 
     # IMAGE preview — embedded inline as a data URI when the draft has an image.
     if has_image and draft.image_path is not None:
@@ -369,10 +525,12 @@ def compose_approval_email(
         )
     )
 
-    # ACTION BUTTONS — Approve is primary (navy); the rest gold-outlined.
+    # ACTION BUTTONS — Approve is primary (navy); the rest gold-outlined. A council
+    # draft additionally offers 'Overrule' (an edit-flow variant); the action set
+    # was chosen above so the missing-link fail-closed guard covers it too.
     buttons = "".join(
         theme.button(label, signed_links[action], primary=primary, settings=cfg)
-        for action, label, primary in _ACTION_ORDER
+        for action, label, primary in action_order
     )
     body_rows.append(_panel_row(f'<div style="margin:6px 0;">{buttons}</div>'))
 

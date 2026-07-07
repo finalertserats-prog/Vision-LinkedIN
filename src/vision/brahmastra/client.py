@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -168,7 +169,13 @@ class BrahmastraClient:
         self._bash = bash_executable
         # Council directory is config-driven (BRAHMASTRA_COUNCIL_DIR); resolve to
         # a concrete Path so script paths are unambiguous across cwd changes.
-        self._council_dir: Path = Path(self._settings.brahmastra_council_dir)
+        # expanduser: BRAHMASTRA_COUNCIL_DIR is commonly '~/.claude/council', and
+        # Python (unlike bash) does NOT expand '~' — an unexpanded path makes bash
+        # receive a bogus literal '~/...' and return empty output. Expand it here so
+        # the real council scripts are found on every OS.
+        self._council_dir: Path = Path(
+            os.path.expanduser(self._settings.brahmastra_council_dir)
+        )
 
     # -- Public synthesis contract -----------------------------------------
     # The three passes differ ONLY in their default lane (Model A/B/C, §13.1);
@@ -213,7 +220,10 @@ class BrahmastraClient:
                 f"expected one of {sorted(_LANE_CONFIG)}"
             )
         script_name, cli_arg = config
-        return str(self._council_dir / script_name), cli_arg
+        # as_posix(): pass forward-slash paths to bash. On Windows str(WindowsPath)
+        # yields backslashes ('C:\\...\\gemini_call.sh') which MSYS bash mishandles;
+        # forward slashes ('C:/.../gemini_call.sh') work across bash on every OS.
+        return (self._council_dir / script_name).as_posix(), cli_arg
 
     def _invoke_cli(self, prompt: str, lane: str) -> str:
         """Return raw stdout from the lane's CLI, with timeout + one retry.

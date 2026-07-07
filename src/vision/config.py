@@ -118,6 +118,41 @@ class Settings(BaseSettings):
     model_critique: str = Field(default="codex", alias="MODEL_CRITIQUE")
     model_verify: str = Field(default="claude", alias="MODEL_VERIFY")
 
+    # --- Council engine (BRD §5 evolution / council-content-vision) --------
+    # WHY these live in Settings: the council is a config-over-code (§22.6)
+    # feature — whether it runs, where its owner topic queue lives, which topics
+    # it must never touch, the Claude binary name, and how many recent formats to
+    # avoid repeating are ALL owner-editable knobs, never baked into code. Each
+    # maps onto a CLI/env var so a deployment tunes the council without a code
+    # change.
+    #
+    # Master on/off switch. Fail-closed default is DISABLED so an un-configured
+    # checkout never fires the council path by accident (§22.9).
+    council_enabled: bool = Field(default=False, alias="COUNCIL_ENABLED")
+    # File of owner-supplied topics, one per line, consumed FIFO before the
+    # council proposes its own. Expanduser'd at read time (see topics.py) so a
+    # '~/...'  path resolves on every OS. Empty string => no queue file.
+    council_topic_queue_path: str = Field(
+        default="prep/council_topics.txt", alias="COUNCIL_TOPIC_QUEUE_PATH"
+    )
+    # Guardrail: topics the council must NEVER touch. Any proposed/queued topic
+    # whose text contains one of these (case-insensitive substring) is filtered
+    # out. Editable via a comma-separated env value (pydantic parses the list).
+    council_exclusions: list[str] = Field(
+        default_factory=list, alias="COUNCIL_EXCLUSIONS"
+    )
+    # The Claude CLI binary used for the compose/deliberate 'claude -p' voice.
+    # Configurable because the launcher name/path varies per host (§22.6).
+    council_claude_bin: str = Field(default="claude", alias="COUNCIL_CLAUDE_BIN")
+    # How many most-recent formats to avoid repeating (the format-variety window).
+    council_recent_window: int = Field(default=4, alias="COUNCIL_RECENT_WINDOW")
+    # Where recent-format history + queue cursor are persisted. NOT hard-coded to
+    # prep/: a configurable state file (expanduser'd) so the council's memory
+    # lives wherever the deployment wants it.
+    council_state_path: str = Field(
+        default="prep/.council_state.json", alias="COUNCIL_STATE_PATH"
+    )
+
     # --- Content -----------------------------------------------------------
     recency_hours: int = Field(default=48, alias="RECENCY_HOURS")
     grounding_min_pct: int = Field(default=100, alias="GROUNDING_MIN_PCT")

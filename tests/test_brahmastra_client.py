@@ -252,9 +252,11 @@ def test_script_path_uses_configured_council_dir() -> None:
         # Act.
         client.generate("draft")
 
-    # Assert: the script path is rooted at BRAHMASTRA_COUNCIL_DIR.
+    # Assert: the script path is rooted at BRAHMASTRA_COUNCIL_DIR. The client passes
+    # forward-slash (posix) paths to bash, so compare against the posix form (str()
+    # would use backslashes on Windows and never match).
     cmd = mock_run.call_args.args[0]
-    assert str(_COUNCIL_DIR) in cmd[1]
+    assert _COUNCIL_DIR.as_posix() in cmd[1]
 
 
 def test_claude_callable_is_used_instead_of_subprocess_when_injected() -> None:

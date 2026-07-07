@@ -47,11 +47,19 @@ from vision.approval.errors import (
 )
 
 # --- Action scope ----------------------------------------------------------
-# The four actions an approval link may carry (§14.2 / FR-10). Kept as an
-# immutable frozenset so the allowed scope is a single source of truth that
-# both issue and verify validate against — an unknown action is rejected at the
-# earliest possible point rather than mis-routing an endpoint later.
-VALID_ACTIONS: frozenset[str] = frozenset({"approve", "reject", "edit", "post_now"})
+# The actions an approval link may carry (§14.2 / FR-10). Kept as an immutable
+# frozenset so the allowed scope is a single source of truth that both issue and
+# verify validate against — an unknown action is rejected at the earliest
+# possible point rather than mis-routing an endpoint later.
+#
+# ``overrule`` is a COUNCIL-only action: the owner supplies a one-line
+# counter-take that overrides the council's synthesised post. It is deliberately
+# an EDIT-flow variant (it reuses the edit machinery — see mailer/composer and
+# the edit endpoint) rather than a whole new endpoint, so it lives in the same
+# allowlist and its signed link verifies through exactly the same path as edit.
+VALID_ACTIONS: frozenset[str] = frozenset(
+    {"approve", "reject", "edit", "post_now", "overrule"}
+)
 
 # Field separator inside the signed payload. Chosen because none of the fields
 # (a UUID draft id, a fixed action word, an integer epoch, a urlsafe nonce) can

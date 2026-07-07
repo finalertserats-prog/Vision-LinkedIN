@@ -88,6 +88,39 @@ _LINKS = {
     "reject": "https://vision.example/a/reject/TOKEN",
 }
 
+# A council draft additionally offers an 'overrule' link (the edit-flow variant).
+_COUNCIL_LINKS = {**_LINKS, "overrule": "https://vision.example/a/overrule/TOKEN"}
+
+
+def _council_draft(**overrides: object) -> SimpleNamespace:
+    """A council draft stub: content_mode='council' + a populated council_meta.
+
+    The ``council_block`` mirrors the de-named composer output (3 unnamed viewpoints
+    + the single 'Powered by Brahmastra' line), and the ``transcript`` is the raw
+    per-voice debate carried only for the owner's review peek — never published.
+    """
+    fields: dict[str, object] = {
+        "content_mode": "council",
+        "council_meta": {
+            "topic": "Should hospitals trust unexplainable AI?",
+            "format": "show_the_split",
+            "situation": "disagreed — one prized speed, another safety",
+            "council_block": (
+                "• Move fast, the upside is huge\n"
+                "• Slow down, the downside is irreversible\n"
+                "• The real risk is pretending it's binary\n"
+                "Powered by Brahmastra"
+            ),
+            "transcript": {
+                "Gemini": {"round1": "Gemini's take one", "round2": "Gemini holds"},
+                "Codex": {"round1": "Codex's take one", "round2": "Codex sharpens"},
+                "Claude": {"round1": "Claude's take one", "round2": "Claude shifts"},
+            },
+        },
+    }
+    fields.update(overrides)
+    return _draft(**fields)
+
 
 # ---------------------------------------------------------------------------
 # SMTPSender — builds correct MIME and calls smtplib (mocked, no real send).
@@ -340,6 +373,77 @@ def test_compose_confirmation_email_contains_post_url() -> None:
     assert subject == "VISION posted — AI in clinical ops"
     assert "https://linkedin.com/feed/post/123" in text
     assert 'href="https://linkedin.com/feed/post/123"' in html
+
+
+# ---------------------------------------------------------------------------
+# Composer — council draft: post + Council block + raw-debate peek + Overrule.
+# ---------------------------------------------------------------------------
+
+
+def test_council_email_renders_post_council_block_and_overrule_button() -> None:
+    # Arrange: a council draft with the extra council_meta + an overrule link.
+    draft = _council_draft(post_text="We keep pretending there is one right answer.")
+
+    # Act.
+    _subject, text, html = compose_approval_email(
+        draft, [], _COUNCIL_LINKS, settings=_settings(), now=_NOW
+    )
+
+    # Assert (HTML): the POST, the Council block (all 3 viewpoints), and the
+    # Overrule button linking to the signed overrule endpoint all render.
+    assert "one right answer" in html
+    assert "Council" in html
+    assert "The real risk is pretending it&#x27;s binary" in html  # escaped apostrophe
+    assert "Overrule" in html
+    assert f'href="{_COUNCIL_LINKS["overrule"]}"' in html
+    # The raw debate is offered as a collapsible peek.
+    assert "<details" in html and "Raw debate" in html
+
+    # Assert (plain text): the Council block appears for non-HTML clients too.
+    assert "[ COUNCIL ]" in text
+    assert "Move fast, the upside is huge" in text
+    assert _COUNCIL_LINKS["overrule"] in text
+
+
+def test_council_email_escapes_transcript_and_council_names() -> None:
+    # Arrange: a transcript whose voice text contains markup must be neutralised,
+    # and voice NAMES that appear only in the internal transcript must be escaped
+    # (never rendered as live markup) in the owner-facing peek.
+    draft = _council_draft()
+    meta = dict(draft.council_meta)
+    meta["transcript"] = {
+        "Gemini": {"round1": "<script>steal()</script> speed matters"},
+    }
+    draft.council_meta = meta
+
+    # Act.
+    _s, _t, html = compose_approval_email(
+        draft, [], _COUNCIL_LINKS, settings=_settings(), now=_NOW
+    )
+
+    # Assert: the injected script is escaped (inert), not live.
+    assert "<script>steal()</script>" not in html
+    assert "&lt;script&gt;steal()&lt;/script&gt;" in html
+
+
+def test_council_email_missing_overrule_link_fails_closed() -> None:
+    # Arrange: a council links map lacking 'overrule' must raise, never a dead link.
+    partial = {k: v for k, v in _COUNCIL_LINKS.items() if k != "overrule"}
+    # Act / Assert.
+    with pytest.raises(KeyError):
+        compose_approval_email(_council_draft(), [], partial, settings=_settings(), now=_NOW)
+
+
+def test_news_draft_has_no_council_block_or_overrule() -> None:
+    # Arrange: a plain news draft (no content_mode/council_meta).
+    # Act.
+    _s, text, html = compose_approval_email(
+        _draft(), [], _LINKS, settings=_settings(), now=_NOW
+    )
+    # Assert: the council-only surfaces are absent; the 4 news buttons stand.
+    assert "[ COUNCIL ]" not in text
+    assert "Overrule" not in html
+    assert "Raw debate" not in html
 
 
 # ---------------------------------------------------------------------------

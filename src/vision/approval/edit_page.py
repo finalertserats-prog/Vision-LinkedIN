@@ -231,6 +231,7 @@ def render_edit_page(
     token: str,
     action_url: str,
     errors: list[str] | None = None,
+    prompt: str | None = None,
     palette: Palette,
 ) -> str:
     """Render the editable draft page with a live character counter (§14.3).
@@ -240,8 +241,21 @@ def render_edit_page(
     "Approve edited" button. Any server-side validation ``errors`` from a prior
     failed submit are shown at the top so the owner can fix and resubmit — the
     token is NOT consumed on a validation failure, so the same link still works.
+
+    ``prompt`` is an OPTIONAL neutral instruction banner shown above the form. It
+    is reused by the council OVERRULE flow to label the page ("Add your override:")
+    so the owner understands this edit is an override of the council's synthesis —
+    the machinery is otherwise identical to a normal edit (no separate page/endpoint).
     """
     hashtags_text = " ".join(hashtags) if hashtags else ""
+    # An optional neutral (non-error) instruction banner — e.g. the overrule prompt.
+    prompt_html = ""
+    if prompt:
+        prompt_html = (
+            f'<div style="background:{palette.card_bg};border:1px solid {palette.border};'
+            f'border-radius:8px;padding:12px 16px;margin-bottom:16px;color:{palette.navy};'
+            f'font-size:14px;font-weight:600;">{_esc(prompt)}</div>'
+        )
     errors_html = ""
     if errors:
         items = "".join(f"<li>{_esc(e)}</li>" for e in errors)
@@ -255,6 +269,7 @@ def render_edit_page(
     # The counter is purely advisory UX; the SERVER re-validates on POST, so a
     # client with JS disabled is still safe (fail-closed on the server).
     body = f"""
+{prompt_html}
 {errors_html}
 <form method="post" action="{_esc(action_url)}">
   <input type="hidden" name="token" value="{_esc(token)}">
