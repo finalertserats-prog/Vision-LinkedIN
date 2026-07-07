@@ -59,3 +59,10 @@ rendered/
 # Local-only: references private finalert internals; junk draft
 prep/finalert_reuse.md
 prep/voice_profile_draft.yaml
+
+# Local runtime / secrets-bearing / junk (never commit)
+*.err.log
+*.db.bak-*
+prep/approve_now.html
+prep/.council_state.json
+assets/
