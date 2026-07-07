@@ -11,10 +11,13 @@ stored state**, so a failed refresh never leaves VISION with no credentials.
 
 SECURITY (threat model §3, hardening checklist):
   * OAuth tokens are stored with **authenticated envelope encryption**
-    (AES-256-GCM). The wrapping key comes from ``settings.token_enc_key`` and is
-    kept entirely separate from the ciphertext (which lives in the DB); the
-    account row id is bound in as GCM *associated data* so a ciphertext cannot be
-    lifted from one account row and replayed into another (tamper/swap defence).
+    (AES-256-GCM) via the shared :mod:`vision.publish.crypto` contract — the ONE
+    key derivation and AAD scheme used by every path. The wrapping key comes from
+    ``settings.token_enc_key`` and is kept entirely separate from the ciphertext
+    (which lives in the DB); the account's ``(provider, member_urn)`` is bound in
+    as GCM *associated data* (see :func:`crypto.oauth_aad`) so a ciphertext cannot
+    be lifted from one account row and replayed into another (tamper/swap defence),
+    AND so a token this job refreshes stays openable by the publisher.
   * A one-byte **ciphertext version** prefixes every envelope so the wrapping key
     can be rotated and old ciphertexts re-encrypted in future without ambiguity.
   * Token plaintext exists only transiently in memory; it is **never logged,
@@ -42,7 +45,6 @@ modes behave identically here).
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 from collections.abc import Iterator
@@ -53,8 +55,6 @@ from pathlib import Path
 from tempfile import gettempdir
 from typing import Final
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -71,6 +71,7 @@ from vision.db.models import AuditLog, OAuthToken
 from vision.db.session import get_session
 from vision.logging_setup import configure_logging, get_logger
 from vision.mailer.sender import EmailSender, get_sender
+from vision.publish import crypto
 from vision.publish.errors import (
     LinkedInError,
     NeedsReauth,
@@ -80,17 +81,6 @@ from vision.publish.errors import (
 from vision.publish.linkedin import LinkedInClient
 
 _log = get_logger("vision.publish.token_refresh")
-
-# --- Encryption envelope constants -----------------------------------------
-# One-byte version prefix on every ciphertext so the wrapping key can be rotated
-# and historical envelopes re-encrypted without guessing their scheme
-# (threat model §3 "ciphertext versioning").
-_ENVELOPE_VERSION: Final[int] = 1
-# GCM standard nonce length. A fresh random nonce is generated per encryption;
-# reuse under one key would break GCM, so it is never derived or cached.
-_NONCE_LEN: Final[int] = 12
-# AES-256 key length in bytes; the configured key is normalised to exactly this.
-_AES_KEY_LEN: Final[int] = 32
 
 # --- Provider constant ------------------------------------------------------
 # Only LinkedIn tokens exist today, but keying the query on the provider keeps
@@ -159,74 +149,38 @@ class _RefreshLocked(RuntimeError):
 # ===========================================================================
 
 
-def _derive_key(key_material: str) -> bytes:
-    """Normalise the configured key string into a 32-byte AES-256 key.
+def encrypt_token(
+    plaintext: str, key_material: str, *, provider: str = _PROVIDER, member_urn: str
+) -> bytes:
+    """Encrypt a token into the CANONICAL authenticated envelope (bytes).
 
-    WHY SHA-256 as a normaliser (not a password KDF): ``settings.token_enc_key``
-    is expected to be a *high-entropy secret* supplied by a secret manager, not a
-    low-entropy human password — so a single SHA-256 pass is a sufficient,
-    deterministic way to accept arbitrary-length key material and yield exactly
-    the 32 bytes AES-256 requires. It is intentionally keyed only on the secret
-    (no salt) so the same configured key always derives the same wrapping key and
-    can decrypt previously stored ciphertext.
+    Delegates to :func:`vision.publish.crypto.encrypt` — the one source of truth
+    for the envelope layout and HKDF-SHA256 key derivation — binding the token to
+    its account via the shared :func:`crypto.oauth_aad` scheme (``provider`` +
+    ``member_urn``). WHY delegate: the OAuth save path, the publisher load path, and
+    THIS refresh job must all seal/open under exactly one key derivation and one
+    AAD, or a freshly refreshed token becomes un-openable at publish time.
     """
-    return hashlib.sha256(key_material.encode("utf-8")).digest()
-
-
-def _associated_data(account_id: str) -> bytes:
-    """Return the GCM associated data binding a ciphertext to its account + version.
-
-    The account row id and the envelope version are authenticated (but not
-    encrypted): decryption fails if either differs, so a ciphertext copied to a
-    different account row — or reinterpreted under a different version — is
-    rejected as tampered (threat model §3).
-    """
-    return bytes([_ENVELOPE_VERSION]) + account_id.encode("utf-8")
-
-
-def encrypt_token(plaintext: str, *, account_id: str, key_material: str) -> bytes:
-    """Encrypt a token string into a versioned, authenticated envelope.
-
-    Envelope layout: ``version(1) || nonce(12) || ciphertext+tag``. AES-256-GCM
-    provides confidentiality *and* integrity in one primitive; the account id is
-    bound in as associated data (see :func:`_associated_data`). A fresh random
-    nonce is used per call — never reused under a key.
-    """
-    key = _derive_key(key_material)
-    nonce = os.urandom(_NONCE_LEN)
-    ciphertext = AESGCM(key).encrypt(
-        nonce, plaintext.encode("utf-8"), _associated_data(account_id)
+    return crypto.encrypt(
+        plaintext, key_material, associated_data=crypto.oauth_aad(provider, member_urn)
     )
-    return bytes([_ENVELOPE_VERSION]) + nonce + ciphertext
 
 
-def decrypt_token(blob: bytes, *, account_id: str, key_material: str) -> str:
-    """Decrypt a token envelope produced by :func:`encrypt_token`.
+def decrypt_token(
+    blob: bytes, key_material: str, *, provider: str = _PROVIDER, member_urn: str
+) -> str:
+    """Decrypt a canonical token envelope produced by :func:`encrypt_token`.
 
-    Raises ``ValueError`` on any structural problem or authentication failure
-    (wrong key, tampered ciphertext, mismatched account/version) — the caller
-    fails closed rather than acting on a half-decrypted value. The error message
-    is deliberately generic so no key or plaintext detail can leak.
+    Reconstructs the SAME associated data from the row's ``provider`` +
+    ``member_urn`` (via :func:`crypto.oauth_aad`) and delegates to
+    :func:`crypto.decrypt`. Any structural problem, unknown version, wrong key, or
+    AAD/tag mismatch surfaces as :class:`crypto.CryptoError` (fail-closed) — the
+    caller acts on a re-auth alert rather than a half-decrypted value, and no key
+    or plaintext detail ever leaks.
     """
-    # Structural validation before touching the cipher: a short/empty blob is a
-    # corrupt record, not a decryptable one.
-    if len(blob) < 1 + _NONCE_LEN + 16:  # +16 = minimum GCM tag length
-        raise ValueError("token envelope is too short to be valid")
-    version = blob[0]
-    if version != _ENVELOPE_VERSION:
-        # A future/unknown version means we lack the scheme to read it; fail
-        # closed rather than mis-decrypting.
-        raise ValueError("unsupported token envelope version")
-    nonce = blob[1 : 1 + _NONCE_LEN]
-    ciphertext = blob[1 + _NONCE_LEN :]
-    key = _derive_key(key_material)
-    try:
-        plaintext = AESGCM(key).decrypt(nonce, ciphertext, _associated_data(account_id))
-    except InvalidTag as exc:
-        # Authentication failed: wrong key, tampered bytes, or account/version
-        # mismatch. Never echo the cause detail.
-        raise ValueError("token envelope failed authentication") from exc
-    return plaintext.decode("utf-8")
+    return crypto.decrypt(
+        blob, key_material, associated_data=crypto.oauth_aad(provider, member_urn)
+    )
 
 
 # ===========================================================================
@@ -466,7 +420,6 @@ def _store_refreshed_tokens(
     token: OAuthToken,
     response: _RefreshResponse,
     *,
-    account_id: str,
     key_material: str,
     now: datetime,
 ) -> None:
@@ -478,17 +431,25 @@ def _store_refreshed_tokens(
     the refresh token + its expiry) so the surrounding transaction commits a
     complete, consistent credential or nothing at all. LinkedIn does not always
     rotate the refresh token; when absent we keep the existing one rather than
-    wiping it.
+    wiping it. New ciphertext is sealed under the CANONICAL (provider, member_urn)
+    AAD so the refreshed token is loadable by the publisher (the save/load contract
+    every path shares).
     """
     token.access_token_enc = encrypt_token(
-        response.access_token, account_id=account_id, key_material=key_material
+        response.access_token,
+        key_material,
+        provider=token.provider,
+        member_urn=token.member_urn,
     )
     if response.expires_in is not None:
         token.access_expires_at = now + timedelta(seconds=response.expires_in)
 
     if response.refresh_token:
         token.refresh_token_enc = encrypt_token(
-            response.refresh_token, account_id=account_id, key_material=key_material
+            response.refresh_token,
+            key_material,
+            provider=token.provider,
+            member_urn=token.member_urn,
         )
         if response.refresh_token_expires_in is not None:
             token.refresh_expires_at = now + timedelta(
@@ -595,10 +556,11 @@ def _do_locked_refresh(
     try:
         refresh_token = decrypt_token(
             token.refresh_token_enc or b"",
-            account_id=account_id,
-            key_material=settings.token_enc_key,
+            settings.token_enc_key,
+            provider=token.provider,
+            member_urn=token.member_urn,
         )
-    except ValueError:
+    except crypto.CryptoError:
         # A record we cannot decrypt (key rotation gone wrong / corruption) is
         # unrecoverable here → alert for re-auth rather than crash.
         reason = "stored refresh token could not be decrypted"
@@ -657,7 +619,6 @@ def _do_locked_refresh(
     _store_refreshed_tokens(
         token,
         validated,
-        account_id=account_id,
         key_material=settings.token_enc_key,
         now=now,
     )

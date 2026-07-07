@@ -1,0 +1,12 @@
+[Unit]
+Description=Fire VISION token refresh at 02:00 IST daily (BRD §10.3)
+
+[Timer]
+# 02:00 Asia/Kolkata (01:00 IST maintenance window, alongside the nightly backup).
+OnCalendar=*-*-* 02:00:00 Asia/Kolkata
+# Catch up if the host was down at 02:00 so token refresh is never silently skipped.
+Persistent=true
+Unit=vision-token.service
+
+[Install]
+WantedBy=timers.target

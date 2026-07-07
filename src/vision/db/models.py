@@ -13,6 +13,7 @@ Tables:
   * oauth_tokens — encrypted LinkedIn tokens (§11.6)
   * audit_log    — append-only state-change log (§11.7)
   * used_tokens  — single-use nonces for approval links (§14.2)
+  * alert_state  — durable last-fired ledger for alert dedup (§17, NFR-08)
 """
 
 from __future__ import annotations
@@ -344,4 +345,30 @@ class UsedToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, doc="When the token was spent."
+    )
+
+
+class AlertState(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Durable last-fired ledger for operational-alert dedup (§17, NFR-08).
+
+    WHY a persisted table and not just an in-process dict: every cron tick runs in a
+    BRAND-NEW process, so an in-memory suppression map starts empty each tick and a
+    persistent fault (a dead feed, a token that needs re-auth) would re-alert on
+    EVERY tick and bury the owner. One row per ``dedup_key`` records when that alert
+    last fired, so suppression survives process restarts and a permanent fault
+    notifies once per window — not once per tick. Read/written by
+    :mod:`vision.ops.alerts` (``DbAlertDedupStore``); it lives HERE so ``create_all``
+    and Alembic autogenerate — which import only ``vision.db.models`` — register it.
+    """
+
+    __tablename__ = "alert_state"
+
+    # The suppression key, ``"{kind}::{subject}"``. UNIQUE so there is exactly one
+    # last-fired row per incident identity and an upsert can target it deterministically.
+    dedup_key: Mapped[str] = mapped_column(
+        Text, nullable=False, unique=True, doc="Suppression key '{kind}::{subject}' (unique)."
+    )
+    # When this alert most recently fired; the instant the dedup window is measured from.
+    last_fired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, doc="Most recent fire instant (UTC-aware)."
     )

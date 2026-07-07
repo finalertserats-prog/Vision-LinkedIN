@@ -1,0 +1,14 @@
+[Unit]
+Description=Fire VISION daily pipeline at 06:30 IST (BRD §10.3)
+
+[Timer]
+# 06:30 Asia/Kolkata. The explicit timezone suffix (systemd v252+, Ubuntu 24.04)
+# keeps the schedule readable in IST while the host clock stays UTC; 06:30 IST is
+# 01:00 UTC if a UTC-only host ever needs the equivalent.
+OnCalendar=*-*-* 06:30:00 Asia/Kolkata
+# Catch up a missed 06:30 (host asleep/down) on next boot so a day isn't skipped.
+Persistent=true
+Unit=vision-daily.service
+
+[Install]
+WantedBy=timers.target

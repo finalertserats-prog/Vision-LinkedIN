@@ -49,16 +49,12 @@ guarded CAS that mirrors :mod:`vision.approval.service`.
 
 from __future__ import annotations
 
-import hashlib
-import os
 import threading
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 from tenacity import (
@@ -74,6 +70,7 @@ from vision.config import Settings, SignatureMode, VisionEnv, get_settings
 from vision.db.models import AuditLog, Draft, OAuthToken
 from vision.logging_setup import get_logger
 from vision.mailer.sender import EmailSender, get_sender
+from vision.publish import crypto
 from vision.publish.errors import (
     LinkedInError,
     NeedsReauth,
@@ -127,16 +124,6 @@ _DEFAULT_LEASE_TTL = timedelta(minutes=10)
 # being silently lost, and the owner is notified (ISSUE 4 reaper/alert).
 _DEFAULT_STUCK_AFTER = timedelta(hours=1)
 
-# --- Token envelope encryption (threat model §3) ---------------------------
-# Ciphertext version byte. Prefixed to every envelope so wrapping keys / schemes
-# can rotate: a decryptor rejects an unknown version rather than mis-parsing
-# (threat model §3 "support ciphertext versioning/re-encryption").
-_ENVELOPE_VERSION = b"\x01"
-# AES-GCM standard nonce size (96 bits) — never reused with the same key because
-# it is freshly random per encryption (a GCM nonce reuse is catastrophic).
-_GCM_NONCE_BYTES = 12
-
-
 class PublisherError(Exception):
     """Base for publisher-layer failures that are not raw LinkedIn errors."""
 
@@ -162,67 +149,42 @@ class ReauthRequired(PublisherError):
     """
 
 
-def _derive_key(raw_key: str) -> bytes:
-    """Derive a 32-byte AES-256 key from the configured ``TOKEN_ENC_KEY`` string.
+def encrypt_token(
+    plaintext: str, key: str, *, provider: str = _LINKEDIN_PROVIDER, member_urn: str
+) -> bytes:
+    """Encrypt a token into the CANONICAL AES-256-GCM envelope (bytes).
 
-    WHY a KDF here: ``TOKEN_ENC_KEY`` is an arbitrary-length secret (a dev
-    placeholder or a high-entropy prod secret from a secret-manager). AES-256-GCM
-    needs exactly 32 bytes, so we hash the secret with SHA-256 to a stable 32-byte
-    key. The wrapping key never touches the DB — it lives only in settings/env
-    (threat model §3: "Never store encryption keys beside ciphertext").
+    Delegates to :func:`vision.publish.crypto.encrypt` — the single source of
+    truth for the envelope layout and the HKDF-SHA256 key derivation — binding the
+    token to its account via the shared :func:`crypto.oauth_aad` scheme
+    (``provider`` + ``member_urn``). WHY delegate rather than re-implement: the OAuth
+    save path, this publisher load path, and the token-refresh job MUST agree on
+    exactly one key derivation AND one AAD, or a token sealed at OAuth time cannot
+    be opened at publish time. Returns raw bytes for the ``LargeBinary`` column.
     """
-    return hashlib.sha256(raw_key.encode("utf-8")).digest()
+    return crypto.encrypt(plaintext, key, associated_data=crypto.oauth_aad(provider, member_urn))
 
 
-def _aad(provider: str) -> bytes:
-    """Return the Associated Authenticated Data binding a token to its account.
+def decrypt_token(
+    blob: bytes, key: str, *, provider: str = _LINKEDIN_PROVIDER, member_urn: str
+) -> str:
+    """Decrypt a canonical token envelope back to its plaintext string.
 
-    GCM authenticates (but does not encrypt) the AAD, so binding the provider
-    into it means ciphertext copied from another account/record fails to decrypt
-    (threat model §3: "record/account ID as associated data"). ``provider`` is the
-    stable, non-secret account discriminator both encrypt and decrypt share.
+    Reconstructs the SAME associated data used at encryption time from the row's
+    ``provider`` + ``member_urn`` (via :func:`crypto.oauth_aad`) and delegates to
+    :func:`crypto.decrypt`. Fails closed: any structural problem, unknown version,
+    wrong/rotated key, or AAD/tag mismatch surfaces as :class:`TokenDecryptError`
+    (translated from :class:`crypto.CryptoError`) so the worker never publishes
+    with an unverifiable token — and never logs or returns the token plaintext.
     """
-    return f"vision:oauth:{provider}".encode("utf-8")
-
-
-def encrypt_token(plaintext: str, key: str, *, provider: str = _LINKEDIN_PROVIDER) -> bytes:
-    """Encrypt a token string into a versioned AES-256-GCM envelope (bytes).
-
-    The envelope layout is ``version(1) || nonce(12) || ciphertext+tag`` so the
-    nonce travels with the ciphertext (it is not secret) and the version enables
-    rotation. Returns raw bytes for the ``LargeBinary`` column. Used by the OAuth
-    callback / token job to persist tokens and by tests to seed them.
-    """
-    aesgcm = AESGCM(_derive_key(key))
-    # A fresh random nonce per encryption — mandatory for GCM safety.
-    nonce = os.urandom(_GCM_NONCE_BYTES)
-    ciphertext = aesgcm.encrypt(nonce, plaintext.encode("utf-8"), _aad(provider))
-    return _ENVELOPE_VERSION + nonce + ciphertext
-
-
-def decrypt_token(blob: bytes, key: str, *, provider: str = _LINKEDIN_PROVIDER) -> str:
-    """Decrypt a versioned AES-256-GCM token envelope back to its plaintext string.
-
-    Fails closed: an unknown version, a truncated envelope, or a failed GCM tag
-    (tampering / wrong key) raises :class:`TokenDecryptError` rather than returning
-    anything usable — the worker must never publish with an unverifiable token.
-    """
-    # Reject anything too short to even contain version + nonce + a tag.
-    if len(blob) <= 1 + _GCM_NONCE_BYTES:
-        raise TokenDecryptError("token ciphertext is truncated")
-    version = blob[:1]
-    if version != _ENVELOPE_VERSION:
-        # An unknown version means a rotation/scheme mismatch — never guess.
-        raise TokenDecryptError(f"unsupported token ciphertext version {version!r}")
-    nonce = blob[1 : 1 + _GCM_NONCE_BYTES]
-    ciphertext = blob[1 + _GCM_NONCE_BYTES :]
-    aesgcm = AESGCM(_derive_key(key))
     try:
-        plaintext = aesgcm.decrypt(nonce, ciphertext, _aad(provider))
-    except InvalidTag as exc:
-        # Authentication failed: tampered ciphertext, wrong key, or wrong account.
+        return crypto.decrypt(
+            blob, key, associated_data=crypto.oauth_aad(provider, member_urn)
+        )
+    except crypto.CryptoError as exc:
+        # Re-type into the publisher's error taxonomy so the §15.4 error matrix can
+        # branch on it; the message stays generic (no key/AAD/plaintext leaked).
         raise TokenDecryptError("token failed authenticated decryption") from exc
-    return plaintext.decode("utf-8")
 
 
 # --- Per-account refresh lock (threat model §3 DoS) -------------------------
@@ -557,10 +519,16 @@ class LinkedInPublisher:
         )
         if row is None or row.access_token_enc is None:
             raise MissingTokens("no LinkedIn OAuth token on record")
+        # ``member_urn`` is NOT NULL and half the AAD, so it is read FIRST and used
+        # to reconstruct the exact associated data the OAuth save path sealed with
+        # — the two paths must agree on (provider, member_urn) or decrypt fails.
+        member_urn = row.member_urn
         access_token = decrypt_token(
-            row.access_token_enc, self._settings.token_enc_key, provider=row.provider
+            row.access_token_enc,
+            self._settings.token_enc_key,
+            provider=row.provider,
+            member_urn=member_urn,
         )
-        member_urn = row.member_urn or self._client.get_member_urn(access_token)
         return row, access_token, member_urn
 
     def _refresh_access_token(self, session: Session, token_row: OAuthToken) -> str | None:
@@ -583,6 +551,7 @@ class LinkedInPublisher:
                 token_row.refresh_token_enc,
                 self._settings.token_enc_key,
                 provider=token_row.provider,
+                member_urn=token_row.member_urn,
             )
             try:
                 data = self._client.refresh(refresh_token)
@@ -599,13 +568,15 @@ class LinkedInPublisher:
 
             key = self._settings.token_enc_key
             # Re-encrypt the fresh access token; rotate refresh token if returned.
+            # Sealed under the SAME canonical (provider, member_urn) AAD so the next
+            # load path can open it (the incompatibility that broke live publish).
             token_row.access_token_enc = encrypt_token(
-                new_access, key, provider=token_row.provider
+                new_access, key, provider=token_row.provider, member_urn=token_row.member_urn
             )
             new_refresh = data.get("refresh_token")
             if isinstance(new_refresh, str) and new_refresh:
                 token_row.refresh_token_enc = encrypt_token(
-                    new_refresh, key, provider=token_row.provider
+                    new_refresh, key, provider=token_row.provider, member_urn=token_row.member_urn
                 )
             # Best-effort expiry bookkeeping so the token job can pre-refresh later.
             self._apply_expiries(token_row, data)

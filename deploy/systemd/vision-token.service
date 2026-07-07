@@ -1,0 +1,34 @@
+[Unit]
+# Proactive OAuth token refresh (BRD §15.3). Runs daily at 02:00 IST so an
+# expiring LinkedIn token is renewed long before the 09:00 publish slot, and the
+# owner is alerted well ahead of the ~yearly re-auth. Exit 1 signals "an account
+# needs manual re-auth" for monitoring (see token_refresh.main).
+Description=VISION OAuth token refresh
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-token
+
+# Memory guardrails — trivial workload, tightly bounded.
+OOMScoreAdjust=-500
+MemoryMax=384M
+MemorySwapMax=0
+TimeoutStartSec=300
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vision/logs
+
+StandardOutput=append:/opt/vision/logs/vision-token.log
+StandardError=append:/opt/vision/logs/vision-token.log
+
+[Install]
+WantedBy=multi-user.target

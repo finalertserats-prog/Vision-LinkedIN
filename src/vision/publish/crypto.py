@@ -57,6 +57,32 @@ _KEY_LEN = 32  # 256-bit derived key => AES-256-GCM
 # other key derived from the same operator secret (e.g. the HMAC key).
 _HKDF_INFO = b"vision:oauth-token-enc:v1"
 
+# Canonical AAD scheme for OAuth tokens (the SINGLE source of truth shared by the
+# OAuth save path, the publisher load path, and the token-refresh save+load path).
+# WHY a shared helper: the associated data is authenticated but NOT stored beside
+# the ciphertext, so it MUST be *reconstructed identically* at decrypt time from
+# fields that live on the ``oauth_tokens`` row. ``provider`` and ``member_urn`` are
+# exactly those fields (both NOT NULL, together the account's natural key), so any
+# path can rebuild the same AAD without extra state. Centralising it here means no
+# path can silently drift onto a different scheme again — the incompatibility that
+# broke the live publish flow (a token sealed at OAuth time was un-openable at
+# publish time). The ``v1`` tag lets the AAD scheme itself be rotated in future.
+_OAUTH_AAD_PREFIX = "vision:oauth:v1"
+
+
+def oauth_aad(provider: str, member_urn: str) -> str:
+    """Return the canonical GCM associated data binding a token to its account.
+
+    The returned string is authenticated (but not encrypted) into every OAuth
+    token envelope. It is deliberately built ONLY from ``provider`` and
+    ``member_urn`` — the two non-secret, NOT-NULL columns on the ``oauth_tokens``
+    row — so the byte-identical AAD is reconstructible at BOTH save and load time
+    without persisting anything extra. Binding both fields means a ciphertext
+    lifted from one account row cannot be decrypted against another (record-swap
+    defence, threat model §3), while keeping every code path on one shared scheme.
+    """
+    return f"{_OAUTH_AAD_PREFIX}:{provider}:{member_urn}"
+
 # Minimum plausible ciphertext: version byte + full nonce + a bare auth tag
 # (empty plaintext still produces a tag). Anything shorter is malformed.
 _MIN_CIPHERTEXT_LEN = 1 + _NONCE_LEN + _TAG_LEN

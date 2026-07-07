@@ -1,0 +1,36 @@
+[Unit]
+# Fail-closed cutoff (BRD §22.9 / FR-16): at 20:00 IST any draft that was never
+# actioned by the owner is EXPIRED so it can never be posted. Skipping this run
+# would let a stale draft survive past its cutoff and be published later — a
+# direct breach of "un-actioned => expire, never post". One-shot + timer-driven,
+# mirroring the token unit; a non-zero exit signals a failed expiry sweep to
+# monitoring (see vision.cli.expire.main).
+Description=VISION fail-closed draft expiry (un-actioned => expire, never post)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-expire
+
+# Memory guardrails — a small DB sweep, tightly bounded (same posture as token).
+OOMScoreAdjust=-500
+MemoryMax=384M
+MemorySwapMax=0
+TimeoutStartSec=300
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vision/logs
+
+StandardOutput=append:/opt/vision/logs/vision-expire.log
+StandardError=append:/opt/vision/logs/vision-expire.log
+
+[Install]
+WantedBy=multi-user.target

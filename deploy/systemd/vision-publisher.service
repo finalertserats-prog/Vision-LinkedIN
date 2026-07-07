@@ -1,0 +1,35 @@
+[Unit]
+# Publisher poller: publishes approved-and-due drafts. Runs every ~5 minutes so
+# a "Post now" click is honoured promptly. One-shot per tick; idempotent (the
+# publisher itself guards against double-posting, see publish/worker.py).
+Description=VISION publisher (publish approved & due drafts)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-publisher
+
+# Memory guardrails — small, bounded (prior VPS OOM incident).
+OOMScoreAdjust=-500
+MemoryMax=384M
+MemorySwapMax=0
+# A publish + confirmation email should be quick; cap so a hung LinkedIn call
+# cannot pin the tick forever.
+TimeoutStartSec=300
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vision/logs
+
+StandardOutput=append:/opt/vision/logs/vision-publisher.log
+StandardError=append:/opt/vision/logs/vision-publisher.log
+
+[Install]
+WantedBy=multi-user.target

@@ -18,7 +18,10 @@ stateful glue that ties that client to VISION's persistence and security model:
 
 Security posture (threat model §3):
   * Tokens are encrypted at rest with AES-256-GCM (see ``crypto``), keyed from
-    ``settings.TOKEN_ENC_KEY`` and bound to the member URN as associated data.
+    ``settings.TOKEN_ENC_KEY`` and bound to the account via the shared
+    ``crypto.oauth_aad(provider, member_urn)`` associated-data scheme — the one
+    contract every path (save here, publisher load, token refresh) reconstructs
+    identically, so a token sealed at callback time is openable at publish time.
   * OAuth ``state`` is compared in constant time to defeat CSRF/forged callbacks.
   * No token value is ever logged, put in an exception, or passed as a CLI arg —
     only non-secret metadata (member URN, expiries) appears in audit-friendly logs.
@@ -174,13 +177,16 @@ def save_tokens(
         # An access token is mandatory; a grant without one is unusable.
         raise OAuthError("token response missing access_token")
 
-    # Bind the ciphertext to the member URN so a row cannot be transplanted.
-    access_enc = crypto.encrypt(access_plain, key, associated_data=member_urn)
+    # Bind the ciphertext to the account via the CANONICAL AAD helper (provider +
+    # member URN) — the exact scheme the publisher load path and the token-refresh
+    # job reconstruct at decrypt time. Using the shared helper (not a bare
+    # member_urn) is what keeps save and load compatible so a token sealed here is
+    # openable at publish time (threat model §3 record-swap defence + go-live fix).
+    aad = crypto.oauth_aad(_PROVIDER, member_urn)
+    access_enc = crypto.encrypt(access_plain, key, associated_data=aad)
     # Refresh token may be absent on some refresh responses; only encrypt if present.
     refresh_enc = (
-        crypto.encrypt(refresh_plain, key, associated_data=member_urn)
-        if refresh_plain
-        else None
+        crypto.encrypt(refresh_plain, key, associated_data=aad) if refresh_plain else None
     )
 
     access_expires_at = _expiry_from_seconds(token_json.get("expires_in"))
@@ -287,11 +293,13 @@ def load_tokens(
     if row is None or row.access_token_enc is None:
         raise OAuthError(f"no stored LinkedIn tokens for member {member_urn}")
 
-    # Decrypt with the SAME associated data used at encryption time (the member
-    # URN); a mismatch here would fail authentication and raise CryptoError.
-    access_token = crypto.decrypt(row.access_token_enc, key, associated_data=member_urn)
+    # Decrypt with the SAME canonical associated data used at encryption time
+    # (provider + member URN via crypto.oauth_aad); any mismatch fails
+    # authentication and raises CryptoError (fail-closed).
+    aad = crypto.oauth_aad(_PROVIDER, member_urn)
+    access_token = crypto.decrypt(row.access_token_enc, key, associated_data=aad)
     refresh_token = (
-        crypto.decrypt(row.refresh_token_enc, key, associated_data=member_urn)
+        crypto.decrypt(row.refresh_token_enc, key, associated_data=aad)
         if row.refresh_token_enc is not None
         else None
     )

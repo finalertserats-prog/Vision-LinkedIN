@@ -1,0 +1,173 @@
+# ---------------------------------------------------------------------------
+# Project VISION — Docker Compose topology (BRD §19).
+#
+# Services:
+#   * vision-web    — always-on FastAPI approval service (the ONLY external
+#                     surface; sits behind the host reverse proxy that adds TLS).
+#   * postgres      — pgvector-enabled Postgres for prod (own-post dedup uses
+#                     vector similarity, §13.4). Dev may instead use SQLite via
+#                     DATABASE_URL and skip this service entirely.
+#   * vision-daily / vision-publisher / vision-token / vision-canary — one-shot
+#                     job containers, run on a schedule by host cron / systemd
+#                     timers (see deploy/crontab.example). They are NOT long
+#                     running; `docker compose run --rm <svc>` fires one pass.
+#
+# Guardrails (prior VPS memory-overload incident, §19 / §21):
+#   * Every service sets `mem_limit` so a runaway job can never starve the box.
+#   * vision-web has a healthcheck; compose/orchestrators restart it on failure.
+#   * Secrets come from `.env` at runtime (`env_file`), never baked into images.
+#
+# NOTE on `mem_limit`: this is the Compose-spec (non-swarm) memory cap. It is the
+# right knob for a single-host VPS deploy and directly honours the incident.
+# ---------------------------------------------------------------------------
+
+services:
+  # --- Always-on approval web service -------------------------------------
+  vision-web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vision-linkedin:latest
+    environment:
+      # web role is the image default, but we pin it explicitly for clarity.
+      VISION_ROLE: web
+    env_file:
+      - .env
+    # Bind ONLY to loopback on the host. The reverse proxy (nginx/Traefik) is the
+    # sole path to the internet and terminates TLS (threat model §2 — TLS only).
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # ~half a gig is ample for uvicorn + the small FastAPI app; capping it means
+    # a leak trips a restart instead of dragging the host into swap.
+    mem_limit: 512m
+    mem_reservation: 128m
+    healthcheck:
+      # Pure-stdlib probe of /healthz (no curl in the slim image). urlopen raises
+      # on a 503 (DB down) so an unhealthy DB correctly marks the service down.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # --- Postgres (pgvector) for production ---------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    env_file:
+      - .env
+    environment:
+      # These are read by the official image's init. Values live in .env so no
+      # credential is committed. `vision` DB matches the BRD §11 schema home.
+      POSTGRES_DB: ${POSTGRES_DB:-vision}
+      POSTGRES_USER: ${POSTGRES_USER:-vision}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - vision-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    # DB gets the largest slice; still bounded so it can never OOM the host.
+    mem_limit: 1g
+    mem_reservation: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vision} -d ${POSTGRES_DB:-vision}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # --- One-shot job: daily pipeline (06:30 IST) ---------------------------
+  vision-daily:
+    image: vision-linkedin:latest
+    environment:
+      VISION_ROLE: daily
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # One-shot: never auto-restart; the scheduler decides when it runs again.
+    restart: "no"
+    # Only started on demand (`compose run`/`compose --profile jobs up`), never
+    # by a bare `compose up`.
+    profiles: ["jobs"]
+    mem_limit: 768m
+    mem_reservation: 128m
+
+  # --- One-shot job: publisher (every ~5 min) -----------------------------
+  vision-publisher:
+    image: vision-linkedin:latest
+    environment:
+      VISION_ROLE: publisher
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["jobs"]
+    mem_limit: 384m
+    mem_reservation: 96m
+
+  # --- One-shot job: token refresh (02:00 IST) ----------------------------
+  vision-token:
+    image: vision-linkedin:latest
+    environment:
+      VISION_ROLE: token
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    profiles: ["jobs"]
+    mem_limit: 384m
+    mem_reservation: 96m
+
+  # --- One-shot job: fail-closed draft expiry (20:00 IST) -----------------
+  # BRD §22.9 / FR-16: expire any draft the owner never actioned so it can never
+  # be posted ("un-actioned => expire, never post"). Must exist under BOTH deploy
+  # shapes (systemd timers AND compose) or the fail-closed cutoff silently breaks.
+  vision-expire:
+    image: vision-linkedin:latest
+    environment:
+      VISION_ROLE: expire
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # One-shot: never auto-restart; the scheduler fires one sweep per cutoff.
+    restart: "no"
+    profiles: ["jobs"]
+    mem_limit: 384m
+    mem_reservation: 96m
+
+  # --- One-shot job: liveness canary --------------------------------------
+  vision-canary:
+    image: vision-linkedin:latest
+    environment:
+      VISION_ROLE: canary
+      # Inside the compose network the web service is reachable by name.
+      # vision.ops.canary reads VISION_HEALTHZ_URL (config over code).
+      VISION_HEALTHZ_URL: http://vision-web:8000/healthz
+    env_file:
+      - .env
+    depends_on:
+      vision-web:
+        condition: service_started
+    restart: "no"
+    profiles: ["jobs"]
+    # The canary does almost nothing; a tiny cap is plenty and models the "canary
+    # must never be the memory hog" rule from the finalert OOM incident.
+    mem_limit: 128m
+
+volumes:
+  # Named volume keeps Postgres data across container recreation.
+  vision-pgdata:

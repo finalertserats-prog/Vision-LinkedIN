@@ -1,0 +1,39 @@
+[Unit]
+# Liveness canary — probes the always-on web tier's /healthz every 60s.
+# Adapted from finalert-canary.service (the L3 preventive-OOM defense). Here it
+# is a lightweight external heartbeat: if the web tier is wedged or its DB is
+# down (503), the probe fails and the failure is logged for alerting, without
+# the canary itself ever being a memory burden.
+Description=VISION liveness canary (probes web /healthz)
+After=network-online.target vision-web.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+# vision.ops.canary probes the loopback web service. Exit 0 only on HTTP 200; a
+# 503 (DB unreachable) or transport error → non-zero → fail-closed. Target is the
+# systemd-local bind (127.0.0.1:8000), overridable via VISION_HEALTHZ_URL in .env.
+ExecStart=/opt/vision/venv/bin/vision-canary
+
+# The canary must NEVER be the OOM victim — mirrors finalert's -1000 canary rule;
+# if the box is under memory pressure we still want the heartbeat to fire.
+OOMScoreAdjust=-900
+MemoryMax=128M
+MemorySwapMax=0
+TimeoutStartSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vision/logs
+
+StandardOutput=append:/opt/vision/logs/vision-canary.log
+StandardError=append:/opt/vision/logs/vision-canary.log
+
+[Install]
+WantedBy=multi-user.target

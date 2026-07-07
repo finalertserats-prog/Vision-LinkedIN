@@ -14,16 +14,21 @@ Every test follows AAA (Arrange → Act → Assert) with a single behavioural fo
 
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock
+from typing import Iterator
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from vision.cli import token as token_cli
 from vision.config import Settings, VisionEnv, get_settings
 from vision.db.models import AuditLog, OAuthToken
+from vision.publish import crypto
 from vision.publish.errors import NeedsReauth, TransientLinkedInError
 from vision.publish.token_refresh import (
     STATUS_DEAD_LETTERED,
@@ -112,13 +117,12 @@ def _seed_token(
     """
     token = OAuthToken(provider="linkedin", member_urn=member_urn)
     session.add(token)
-    session.flush()  # assign the UUID PK used as the encryption AAD / account id
-    account_id = str(token.id)
+    session.flush()  # assign the UUID PK (account id used for locks/audit)
     token.access_token_enc = encrypt_token(
-        _OLD_ACCESS, account_id=account_id, key_material=_ENC_KEY
+        _OLD_ACCESS, _ENC_KEY, provider="linkedin", member_urn=member_urn
     )
     token.refresh_token_enc = encrypt_token(
-        _OLD_REFRESH, account_id=account_id, key_material=_ENC_KEY
+        _OLD_REFRESH, _ENC_KEY, provider="linkedin", member_urn=member_urn
     )
     token.access_expires_at = access_expires_at
     token.refresh_expires_at = refresh_expires_at
@@ -130,15 +134,20 @@ def _seed_token(
 
 
 def test_encrypt_decrypt_round_trips_and_binds_to_account() -> None:
-    # Arrange: encrypt a token bound to account "A".
-    blob = encrypt_token(_OLD_ACCESS, account_id="A", key_material=_ENC_KEY)
+    # Arrange: encrypt a token bound to member "A" under the canonical AAD.
+    member_a = "urn:li:person:A"
+    member_b = "urn:li:person:B"
+    blob = encrypt_token(_OLD_ACCESS, _ENC_KEY, provider="linkedin", member_urn=member_a)
 
-    # Act: decrypting under a DIFFERENT account id must fail authentication.
-    with pytest.raises(ValueError):
-        decrypt_token(blob, account_id="B", key_material=_ENC_KEY)
+    # Act: decrypting bound to a DIFFERENT member must fail authentication.
+    with pytest.raises(crypto.CryptoError):
+        decrypt_token(blob, _ENC_KEY, provider="linkedin", member_urn=member_b)
 
-    # Assert: decrypting under the correct account id returns the plaintext.
-    assert decrypt_token(blob, account_id="A", key_material=_ENC_KEY) == _OLD_ACCESS
+    # Assert: decrypting bound to the correct member returns the plaintext.
+    assert (
+        decrypt_token(blob, _ENC_KEY, provider="linkedin", member_urn=member_a)
+        == _OLD_ACCESS
+    )
 
 
 # --- Near expiry triggers refresh + stores new encrypted tokens ------------
@@ -153,7 +162,6 @@ def test_near_expiry_refreshes_and_stores_new_encrypted_tokens(
         access_expires_at=_NOW + timedelta(days=3),
         refresh_expires_at=_NOW + timedelta(days=300),
     )
-    account_id = str(token.id)
     client = _StubLinkedInClient(
         {"access_token": _NEW_ACCESS, "expires_in": 5_184_000, "refresh_token": _NEW_REFRESH}
     )
@@ -167,7 +175,7 @@ def test_near_expiry_refreshes_and_stores_new_encrypted_tokens(
     # Assert: refreshed, and the STORED ciphertext now decrypts to the NEW token.
     assert outcomes[0].status == STATUS_REFRESHED
     stored = decrypt_token(
-        token.access_token_enc, account_id=account_id, key_material=_ENC_KEY
+        token.access_token_enc, _ENC_KEY, provider="linkedin", member_urn=token.member_urn
     )
     assert stored == _NEW_ACCESS
 
@@ -419,7 +427,6 @@ def test_malformed_refresh_payload_alerts_and_preserves_token(
         access_expires_at=_NOW + timedelta(days=1),
         refresh_expires_at=_NOW + timedelta(days=300),
     )
-    account_id = str(token.id)
     original_blob = token.access_token_enc
     client = _StubLinkedInClient(bad_payload)
     sender = Mock()
@@ -435,7 +442,9 @@ def test_malformed_refresh_payload_alerts_and_preserves_token(
     assert outcomes[0].status == STATUS_REAUTH_ALERTED
     assert token.access_token_enc == original_blob
     assert (
-        decrypt_token(token.access_token_enc, account_id=account_id, key_material=_ENC_KEY)
+        decrypt_token(
+            token.access_token_enc, _ENC_KEY, provider="linkedin", member_urn=token.member_urn
+        )
         == _OLD_ACCESS
     )
     sender.send.assert_called_once()
@@ -476,3 +485,81 @@ def test_one_account_error_does_not_abort_remaining_accounts(
     statuses = {o.status for o in outcomes}
     assert STATUS_REFRESHED in statuses
     assert STATUS_DEAD_LETTERED in statuses
+
+
+# ===========================================================================
+# CLI crash-loop / secret-leak boundary (Codex HIGH — token.py ~42-54).
+#
+# WHY these live here: the token job is the MOST secret-sensitive cron. Its entry
+# point (``token.main``) must fail closed — an unexpected fault from the refresh
+# path must yield a non-zero exit and a SANITIZED log (exception class +
+# correlation id ONLY), never a traceback and never raw provider/token text.
+# ===========================================================================
+
+# Marker present ONLY inside the injected exception message; if it appears in the
+# logs, provider/secret text leaked (the vulnerability under test).
+_TOKEN_SECRET_MARKER = "REFRESH-PROVIDER-SECRET-do-not-log-xyz789"  # noqa: S105 - test placeholder
+
+
+@contextmanager
+def _fake_session_cm() -> Iterator[MagicMock]:
+    """Stand-in for ``get_session()`` yielding a throwaway session (raise before use)."""
+    yield MagicMock(name="session")
+
+
+def test_main_returns_1_and_sanitizes_when_refresh_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: the refresh path raises an unexpected fault carrying secret-ish text.
+    get_settings.cache_clear()
+    live = get_settings().model_copy(
+        update={"vision_env": VisionEnv.LIVE, "token_enc_key": _ENC_KEY}
+    )
+    monkeypatch.setattr(token_cli, "get_settings", lambda: live)
+    monkeypatch.setattr(token_cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(token_cli, "get_session", _fake_session_cm)
+
+    def _boom(session: object, now: datetime, *, settings: Settings) -> object:
+        raise RuntimeError(f"linkedin refresh rejected: {_TOKEN_SECRET_MARKER}")
+
+    monkeypatch.setattr(token_cli, "refresh_if_needed", _boom)
+    caplog.set_level(logging.ERROR)
+
+    # Act: must NOT raise — the boundary swallows the fault and fails closed.
+    exit_code = token_cli.main()
+
+    # Assert: non-zero exit for cron alerting, and a SANITIZED record — exception
+    # class + correlation id only, NO traceback, NO provider/token text.
+    assert exit_code == 1
+    record = caplog.records[-1]
+    assert record.error_type == "RuntimeError"
+    assert record.correlation_id
+    assert record.exc_info is None  # no traceback captured
+    assert _TOKEN_SECRET_MARKER not in caplog.text
+    assert _TOKEN_SECRET_MARKER not in str(record.__dict__)
+
+
+def test_main_fails_closed_when_settings_load_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: settings/secret parsing raises during startup — for the most
+    # secret-sensitive job this must NEVER escape as a raw (possibly secret-bearing)
+    # traceback.
+    get_settings.cache_clear()
+    monkeypatch.setattr(token_cli, "configure_logging", lambda: None)
+
+    def _boom_settings() -> Settings:
+        raise RuntimeError(f"bad token config: {_TOKEN_SECRET_MARKER}")
+
+    monkeypatch.setattr(token_cli, "get_settings", _boom_settings)
+    caplog.set_level(logging.ERROR)
+
+    # Act: caught by the same fail-closed boundary.
+    exit_code = token_cli.main()
+
+    # Assert: non-zero exit, sanitized log, no traceback / provider text leaked.
+    assert exit_code == 1
+    record = caplog.records[-1]
+    assert record.error_type == "RuntimeError"
+    assert record.exc_info is None
+    assert _TOKEN_SECRET_MARKER not in caplog.text

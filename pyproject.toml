@@ -63,6 +63,7 @@ vision-daily = "vision.cli.daily:main"
 vision-publisher = "vision.publish.worker:main"  # FR-12/13/14: real publisher — publish approved & due drafts (§15.2/§15.4)
 vision-token = "vision.publish.token_refresh:main"  # FR-17: daily proactive OAuth token refresh (§15.3)
 vision-expire = "vision.cli.expire:main"  # FR-16: cron at cutoff (default 20:00 IST) auto-expires un-actioned drafts
+vision-canary = "vision.ops.canary:main"  # §17/NFR-08: external health canary — pings /healthz, alerts + exits non-zero on failure
 
 [tool.setuptools.packages.find]
 # Discover the `vision` package (and subpackages) under src/ only.

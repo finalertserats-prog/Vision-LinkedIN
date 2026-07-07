@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# Project VISION — example crontab (BRD §10.3 schedule).
+#
+# This is the HOST-CRON alternative to the systemd timers in deploy/systemd/.
+# Use ONE mechanism, not both. systemd timers are preferred on Ubuntu (better
+# logging, memory caps, catch-up); this file documents the equivalent schedule
+# for hosts without systemd or operators who prefer cron.
+#
+# Install:  crontab -u vision deploy/crontab.example
+#
+# IMPORTANT — timezone: cron uses the host's local time. The times below assume
+# the box is set to Asia/Kolkata (IST). If the host runs UTC, use the UTC column
+# in the comments instead (IST = UTC + 5:30).
+#
+# Fields:  minute hour day-of-month month day-of-week  command
+# All jobs run the installed console entry points from the venv and append to
+# per-job logs; the entry points exit non-zero on failure so cron's MAILTO (set
+# it above) alerts the operator.
+# ---------------------------------------------------------------------------
+
+# Send cron failure output to the operator (set to the real inbox on the VPS).
+MAILTO=vishnu.wildeagle@gmail.com
+# Absolute PATH so the venv binaries and pg_dump resolve under cron's minimal env.
+PATH=/opt/vision/venv/bin:/usr/local/bin:/usr/bin:/bin
+
+# 06:30 IST (01:00 UTC) — daily pipeline: ingest→curate→synthesise→email draft.
+30 6 * * *   /opt/vision/venv/bin/vision-daily        >> /opt/vision/logs/vision-daily.log 2>&1
+
+# Every 5 minutes — publisher: publish approved-and-due drafts + confirmation.
+*/5 * * * *  /opt/vision/venv/bin/vision-publisher    >> /opt/vision/logs/vision-publisher.log 2>&1
+
+# 20:00 IST (14:30 UTC) — expire any un-actioned draft (fail-closed: no post).
+0 20 * * *   /opt/vision/venv/bin/vision-expire       >> /opt/vision/logs/vision-expire.log 2>&1
+
+# 02:00 IST (20:30 UTC prev day) — proactive OAuth token refresh (BRD §15.3).
+0 2 * * *    /opt/vision/venv/bin/vision-token        >> /opt/vision/logs/vision-token.log 2>&1
+
+# 02:00 IST — nightly Postgres backup of the `vision` schema (retain 14 days).
+0 2 * * *    /opt/vision/venv/bin/python /opt/vision/scripts/backup.py  >> /opt/vision/logs/vision-backup.log 2>&1

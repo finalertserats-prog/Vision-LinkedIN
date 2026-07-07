@@ -1,0 +1,37 @@
+[Unit]
+# 06:30 IST daily pipeline: ingest → curate → synthesise → quality → email.
+# One-shot (timer-driven), so no Restart= — a failed run is retried next tick and
+# alerted on via its non-zero exit, not restart-looped.
+Description=VISION daily pipeline (ingest/curate/synthesise/email)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-daily
+
+# --- Memory guardrails (prior VPS OOM incident) -------------------------
+# The daily job is the heaviest (it shells out to the Brahmastra LLM CLIs), so
+# it gets the largest job cap — still bounded so it cannot swamp the web tier.
+OOMScoreAdjust=-500
+MemoryMax=768M
+MemorySwapMax=0
+# Generous ceiling for the multi-model synthesis chain; fail rather than hang.
+TimeoutStartSec=1200
+
+# Filesystem hardening (same posture as the web unit).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/vision/logs
+
+StandardOutput=append:/opt/vision/logs/vision-daily.log
+StandardError=append:/opt/vision/logs/vision-daily.log
+
+[Install]
+WantedBy=multi-user.target

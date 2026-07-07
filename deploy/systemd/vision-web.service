@@ -1,0 +1,60 @@
+[Unit]
+# Always-on FastAPI approval service — the only externally reachable surface.
+# Adapted from finalert-live.service (memory hardening + restart-storm guard),
+# but tuned for a tiny web tier instead of a trading engine.
+Description=VISION approval web service (FastAPI, always-on)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# --- Restart-storm guard (MUST be in [Unit], not [Service]) --------------
+# systemd only honours StartLimitIntervalSec/StartLimitBurst in the [Unit]
+# section; in [Service] they are silently ignored and a genuinely broken build
+# crash-loops forever every RestartSec. Kept here so >5 restarts within 600s
+# trips the rate limiter and surfaces the failure instead of hammering restarts.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Least privilege (threat model §2): a dedicated unprivileged account, never root.
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+# Secrets injected at runtime, never in the unit file (§19 / §10 secrets discipline).
+EnvironmentFile=/opt/vision/.env
+# --factory: web.py exposes create_app(), not a module-level app, on purpose.
+# Bind to loopback only — the host reverse proxy adds TLS and is the sole ingress.
+ExecStart=/opt/vision/venv/bin/uvicorn --factory vision.approval.web:create_app --host 127.0.0.1 --port 8000
+
+# --- Memory guardrails (prior VPS OOM incident, §19/§21) ----------------
+# OOMScoreAdjust keeps the web tier well-protected but below any DB/backbone;
+# MemoryMax + no swap means a leak trips a clean restart instead of thrashing.
+OOMScoreAdjust=-700
+MemoryMax=512M
+MemorySwapMax=0
+
+# --- Availability -------------------------------------------------------
+# Restart=always is the ACTIVE liveness protection; the external canary backs it.
+# We deliberately omit any systemd watchdog directive: uvicorn is Type=simple and
+# never sends sd_notify keep-alive pings, so a watchdog timeout would let systemd
+# kill/restart a perfectly healthy web tier on a fixed interval — the exact outage
+# finalert hit and had to neutralise with a disable drop-in. Omitting it is the
+# clean fix.
+Restart=always
+RestartSec=5
+# NOTE: the StartLimit* rate limiter lives in [Unit] above — systemd ignores it
+# here in [Service]. RestartSec stays here (this IS where systemd honours it).
+
+# --- Filesystem hardening (threat model §2 — read-only where possible) --
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# The only writable path the service needs is its append-only log dir.
+ReadWritePaths=/opt/vision/logs
+
+# Structured JSON logs (logging_setup.py) appended to a stable file for ops.
+StandardOutput=append:/opt/vision/logs/vision-web.log
+StandardError=append:/opt/vision/logs/vision-web.log
+
+[Install]
+WantedBy=multi-user.target

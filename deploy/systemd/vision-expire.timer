@@ -1,0 +1,15 @@
+[Unit]
+Description=Fire VISION draft expiry at 20:00 IST daily (BRD §22.9 fail-closed cutoff)
+
+[Timer]
+# 20:00 Asia/Kolkata — the daily cutoff. Un-actioned drafts are expired here so
+# they are never posted; the explicit timezone keeps the slot readable in IST
+# while the host clock stays UTC (20:00 IST == 14:30 UTC).
+OnCalendar=*-*-* 20:00:00 Asia/Kolkata
+# Persistent is CRITICAL for fail-closed: if the host was down at 20:00, catch up
+# on next boot so a stale draft can never slip past its cutoff and be published.
+Persistent=true
+Unit=vision-expire.service
+
+[Install]
+WantedBy=timers.target

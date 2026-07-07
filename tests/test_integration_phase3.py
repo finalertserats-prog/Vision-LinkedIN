@@ -91,16 +91,21 @@ def _make_settings(
 def _seed_token(session: Session, *, with_refresh: bool = True) -> OAuthToken:
     """Persist ONE LinkedIn OAuth row using the worker's REAL envelope encryption.
 
-    The publisher decrypts through ``worker.decrypt_token`` (SHA-256-derived key,
-    provider-bound GCM AAD, versioned envelope), so the row MUST be sealed with
-    the matching ``worker.encrypt_token`` — exactly what the OAuth callback
-    persists in production. This is deliberately the real crypto, not a stub, so
-    the test exercises the authenticated round-trip end-to-end.
+    The publisher decrypts through ``worker.decrypt_token`` (HKDF-SHA256 key and
+    the canonical ``crypto.oauth_aad(provider, member_urn)`` GCM AAD, versioned
+    envelope), so the row MUST be sealed with the matching ``worker.encrypt_token``
+    — exactly what the OAuth callback persists in production. This is deliberately
+    the real crypto, not a stub, so the test exercises the authenticated round-trip
+    end-to-end.
     """
     row = OAuthToken(provider="linkedin", member_urn=_MEMBER_URN)
-    row.access_token_enc = encrypt_token(_ACCESS, _ENC_KEY, provider="linkedin")
+    row.access_token_enc = encrypt_token(
+        _ACCESS, _ENC_KEY, provider="linkedin", member_urn=_MEMBER_URN
+    )
     if with_refresh:
-        row.refresh_token_enc = encrypt_token(_REFRESH, _ENC_KEY, provider="linkedin")
+        row.refresh_token_enc = encrypt_token(
+            _REFRESH, _ENC_KEY, provider="linkedin", member_urn=_MEMBER_URN
+        )
     session.add(row)
     session.commit()
     return row
@@ -307,7 +312,9 @@ def test_publish_refreshes_on_401_then_retries_and_reencrypts_token(
     # through the same authenticated envelope (threat model §3 atomic replace).
     db_session.refresh(token_row)
     assert (
-        decrypt_token(token_row.access_token_enc, _ENC_KEY, provider="linkedin")
+        decrypt_token(
+            token_row.access_token_enc, _ENC_KEY, provider="linkedin", member_urn=_MEMBER_URN
+        )
         == _NEW_ACCESS
     )
 

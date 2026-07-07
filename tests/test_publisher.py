@@ -19,13 +19,17 @@ alert, dry_run posts nothing, staging posts-then-deletes, and due-filtering in
 
 from __future__ import annotations
 
+import logging
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import MagicMock, Mock
 
 import pytest
 from sqlalchemy.orm import Session
 
+from vision.cli import publisher as publisher_cli
 from vision.config import Settings, SignatureMode, VisionEnv, get_settings
 from vision.db.models import Draft, OAuthToken
 from vision.publish.errors import NeedsReauth, RateLimited, TransientLinkedInError
@@ -64,16 +68,22 @@ def _make_settings(env: VisionEnv, *, signature: SignatureMode = SignatureMode.O
 
 
 def _seed_token(session: Session, *, with_refresh: bool = True) -> OAuthToken:
-    """Insert one LinkedIn OAuth row encrypted with the worker's own envelope.
+    """Insert one LinkedIn OAuth row sealed under the CANONICAL crypto contract.
 
-    The worker decrypts via ``vision.publish.worker.decrypt_token`` (SHA-256 key,
-    provider-bound AAD), so tokens MUST be sealed with the matching
-    ``worker.encrypt_token`` — mirroring exactly what the OAuth callback persists.
+    The worker decrypts via ``vision.publish.worker.decrypt_token``, which derives
+    its key with HKDF-SHA256 and its AAD from ``(provider, member_urn)`` through the
+    shared ``crypto.oauth_aad`` helper — exactly what the OAuth callback persists.
+    Seeding through the same ``worker.encrypt_token`` guarantees the round-trip
+    mirrors production and cannot drift onto a different scheme.
     """
     row = OAuthToken(provider="linkedin", member_urn=_MEMBER_URN)
-    row.access_token_enc = encrypt_token(_ACCESS, _ENC_KEY, provider="linkedin")
+    row.access_token_enc = encrypt_token(
+        _ACCESS, _ENC_KEY, provider="linkedin", member_urn=_MEMBER_URN
+    )
     if with_refresh:
-        row.refresh_token_enc = encrypt_token(_REFRESH, _ENC_KEY, provider="linkedin")
+        row.refresh_token_enc = encrypt_token(
+            _REFRESH, _ENC_KEY, provider="linkedin", member_urn=_MEMBER_URN
+        )
     session.add(row)
     session.commit()
     return row
@@ -497,3 +507,177 @@ def test_poll_and_publish_only_processes_due_unpublished_drafts(
     client.publish_text.assert_called_once()
     assert due.post_urn == _POST_URN
     assert due.state == "published"
+
+
+# ===========================================================================
+# CLI crash-loop / resource-leak boundary (Codex HIGH — publisher.py ~41-55).
+#
+# WHY these live here: they exercise the ``vision-publisher`` cron ENTRY POINT
+# (``publisher.main``), proving its fail-closed boundary — a 5-min poller must
+# never dump an unsanitized traceback (crash-loop-adjacent) and must always
+# release the LinkedIn HTTP pool, even when the worker raises mid-poll.
+# ===========================================================================
+
+# A marker only ever present inside the injected exception's message. If it
+# surfaces anywhere in the logs, raw provider text leaked (the bug under test).
+_PROVIDER_SECRET_MARKER = "PROVIDER-SECRET-LEAK-do-not-log-abc123"  # noqa: S105 - test placeholder
+
+
+@contextmanager
+def _fake_session_cm() -> Iterator[MagicMock]:
+    """A stand-in for ``get_session()`` yielding a throwaway session.
+
+    The worker is stubbed to raise before touching the session meaningfully, so a
+    plain mock suffices; it exists only to satisfy the ``with`` protocol.
+    """
+    yield MagicMock(name="session")
+
+
+class _ExplodingPublisher:
+    """A ``LinkedInPublisher`` stand-in whose poll raises with provider-y text.
+
+    Records ``close()`` calls so the test can prove the HTTP pool is always
+    released even when the poll blows up (the resource-leak invariant).
+    """
+
+    def __init__(self, settings: Settings) -> None:  # noqa: D401 - mirrors real ctor
+        self.closed = 0
+
+    def poll_and_publish(self, session: object, now: datetime) -> int:
+        # Simulate a provider/library fault whose message carries secret-ish text;
+        # the boundary must NOT echo this into the logs.
+        raise RuntimeError(f"linkedin upstream refused: {_PROVIDER_SECRET_MARKER}")
+
+    def reap_stuck(self, session: object, now: datetime) -> int:  # pragma: no cover
+        return 0
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _install_live_publisher_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point the CLI module at deterministic LIVE settings and a no-op logger setup.
+
+    ``configure_logging`` is stubbed so pytest's ``caplog`` handler survives (the
+    real setup clears the root handlers), letting us assert on the emitted record.
+    """
+    get_settings.cache_clear()
+    settings = get_settings().model_copy(update={"vision_env": VisionEnv.LIVE})
+    monkeypatch.setattr(publisher_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(publisher_cli, "configure_logging", lambda: None)
+    monkeypatch.setattr(publisher_cli, "get_session", _fake_session_cm)
+
+
+def test_main_returns_1_and_sanitizes_and_closes_when_worker_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: a worker whose poll raises an exception carrying provider text.
+    _install_live_publisher_cli(monkeypatch)
+    exploding = _ExplodingPublisher(object())  # type: ignore[arg-type]
+    monkeypatch.setattr(publisher_cli, "LinkedInPublisher", lambda settings: exploding)
+    caplog.set_level(logging.ERROR)
+
+    # Act: the cron entry point must swallow the fault, not propagate it.
+    exit_code = publisher_cli.main()
+
+    # Assert: fail-closed non-zero exit (cron alerts), the HTTP pool was released,
+    # and the log is SANITIZED — exception class + correlation id only, with NO
+    # traceback and NO raw provider text.
+    assert exit_code == 1
+    assert exploding.closed == 1
+    record = caplog.records[-1]
+    assert record.error_type == "RuntimeError"
+    assert record.correlation_id
+    assert record.exc_info is None  # no traceback captured
+    assert _PROVIDER_SECRET_MARKER not in caplog.text
+    assert _PROVIDER_SECRET_MARKER not in str(record.__dict__)
+
+
+def test_main_releases_nothing_but_fails_closed_when_construction_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: constructing the publisher itself raises (partial-alloc-then-raise).
+    _install_live_publisher_cli(monkeypatch)
+
+    def _boom_ctor(settings: Settings) -> _ExplodingPublisher:
+        raise RuntimeError(f"pool init failed: {_PROVIDER_SECRET_MARKER}")
+
+    monkeypatch.setattr(publisher_cli, "LinkedInPublisher", _boom_ctor)
+    caplog.set_level(logging.ERROR)
+
+    # Act: must not raise (no AttributeError from close() on a never-built publisher).
+    exit_code = publisher_cli.main()
+
+    # Assert: fail-closed, sanitized, and no traceback / provider text leaked.
+    assert exit_code == 1
+    record = caplog.records[-1]
+    assert record.error_type == "RuntimeError"
+    assert record.exc_info is None
+    assert _PROVIDER_SECRET_MARKER not in caplog.text
+
+
+class _CloseFailingPublisher:
+    """A publisher whose poll SUCCEEDS but whose ``close()`` raises.
+
+    Proves the finally-time cleanup can never escape the cron boundary as an
+    unsanitized traceback (a crash-loop source): a failing ``close()`` must degrade
+    to a sanitized log + non-zero exit, not propagate.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        pass
+
+    def poll_and_publish(self, session: object, now: datetime) -> int:
+        return 0
+
+    def reap_stuck(self, session: object, now: datetime) -> int:
+        return 0
+
+    def close(self) -> None:
+        raise RuntimeError(f"pool close failed: {_PROVIDER_SECRET_MARKER}")
+
+
+def test_main_fails_closed_when_close_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: a clean poll, but the HTTP-pool close() blows up during cleanup.
+    _install_live_publisher_cli(monkeypatch)
+    monkeypatch.setattr(
+        publisher_cli, "LinkedInPublisher", lambda settings: _CloseFailingPublisher(settings)
+    )
+    caplog.set_level(logging.ERROR)
+
+    # Act: cleanup failure must not escape as a traceback.
+    exit_code = publisher_cli.main()
+
+    # Assert: fail-closed non-zero exit with a sanitized cleanup log (no traceback,
+    # no provider text).
+    assert exit_code == 1
+    record = caplog.records[-1]
+    assert record.error_type == "RuntimeError"
+    assert record.exc_info is None
+    assert _PROVIDER_SECRET_MARKER not in caplog.text
+
+
+def test_main_fails_closed_when_settings_load_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: settings/secret parsing raises during startup (before any work).
+    get_settings.cache_clear()
+    monkeypatch.setattr(publisher_cli, "configure_logging", lambda: None)
+
+    def _boom_settings() -> Settings:
+        raise RuntimeError(f"bad config: {_PROVIDER_SECRET_MARKER}")
+
+    monkeypatch.setattr(publisher_cli, "get_settings", _boom_settings)
+    caplog.set_level(logging.ERROR)
+
+    # Act: a startup fault must be caught by the same fail-closed boundary.
+    exit_code = publisher_cli.main()
+
+    # Assert: non-zero exit, sanitized log, no traceback / provider text leaked.
+    assert exit_code == 1
+    record = caplog.records[-1]
+    assert record.error_type == "RuntimeError"
+    assert record.exc_info is None
+    assert _PROVIDER_SECRET_MARKER not in caplog.text

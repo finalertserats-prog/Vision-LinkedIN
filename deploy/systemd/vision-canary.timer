@@ -1,0 +1,13 @@
+[Unit]
+Description=Run VISION liveness canary every 60 seconds
+
+[Timer]
+# First tick 30s after boot (give the web tier time to bind), then every 60s.
+# AccuracySec keeps it prompt so a wedged web service is noticed within ~1 min.
+OnBootSec=30
+OnUnitActiveSec=60
+AccuracySec=5
+Unit=vision-canary.service
+
+[Install]
+WantedBy=timers.target

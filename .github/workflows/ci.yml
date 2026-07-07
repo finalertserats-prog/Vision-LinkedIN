@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# Project VISION — Continuous Integration (BRD §19 / Phase 0 acceptance).
+#
+# Runs the test suite + lint on every push and pull request so a broken build or
+# a failing test never reaches `main`. Tests mock ALL external I/O (network /
+# SMTP / subprocess / LinkedIn) and default to the SQLite dev DB, so CI needs no
+# secrets and no service containers — it is hermetic and fast.
+# ---------------------------------------------------------------------------
+name: CI
+
+# Trigger on pushes and PRs. No branch filter: we want signal on every branch,
+# and branch protection on `main` gates merges on this workflow passing.
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref so a rapid push sequence doesn't queue
+# stale jobs (saves minutes, gives faster feedback).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: lint + pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (requires-python >=3.11); 3.12 guards forward-compat.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      # Check out the repo at the triggering commit.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install the requested Python and cache pip downloads keyed on the deps.
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Editable install with the dev extras (pytest, respx, ruff). `pip check`
+      # verifies the resolved dependency set is internally consistent.
+      - name: Install package + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip check
+
+      # Lint first (fast): style/errors surface before the longer test run.
+      - name: Ruff lint
+        run: ruff check src tests scripts
+
+      # Run the suite. Tests are hermetic (SQLite default, all external I/O
+      # mocked), so no env/secrets are required here.
+      - name: Pytest
+        run: pytest -q
