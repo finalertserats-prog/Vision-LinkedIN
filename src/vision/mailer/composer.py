@@ -20,7 +20,6 @@ a confirmation page — the state change happens on that page's POST.
 
 from __future__ import annotations
 
-import base64
 import html as _html
 import logging
 import mimetypes
@@ -256,24 +255,39 @@ def _inset(inner_html: str) -> str:
     )
 
 
-def _image_data_uri(image_path: str) -> str | None:
-    """Read a local image file and return an inline ``data:`` URI, or ``None``.
+# WHY a CID (not a data: URI): Gmail STRIPS inline ``data:`` image URIs, so the
+# preview showed as a broken image. A ``cid:`` reference backed by a MIME-attached
+# image part renders in Gmail and stays self-contained (no third-party fetch that
+# could leak a referrer / confirm an open — threat model §14).
+POST_IMAGE_CID = "vision-post-image"
 
-    WHY inline (not a hosted URL): the threat model forbids third-party assets in
-    the email (no external fetch that could leak a referrer / confirm an open).
-    A base64 data URI keeps the preview self-contained. File-read failures return
-    ``None`` (the email still sends, just without the preview) — specific
-    exceptions only, never a bare ``except`` (§22).
+
+@dataclass(frozen=True)
+class InlineImage:
+    """An image to attach as a related MIME part and reference via ``cid:``."""
+
+    cid: str
+    data: bytes
+    subtype: str  # e.g. 'png', 'jpeg'
+
+
+def inline_image_for(image_path: str | None, image_type: str | None) -> InlineImage | None:
+    """Load a draft's image as an inline CID part, or ``None`` if absent/unreadable.
+
+    Returns ``None`` for a text-only draft or an unreadable file (the email still
+    sends, just without the preview) — specific exceptions only (§22).
     """
+    if not image_path or (image_type or "none") == "none":
+        return None
     path = Path(image_path)
     try:
         raw = path.read_bytes()
     except (FileNotFoundError, OSError) as exc:
-        log.warning("image preview skipped (%s); sending without it.", exc.__class__.__name__)
+        log.warning("inline image skipped (%s); sending without it.", exc.__class__.__name__)
         return None
     mime, _ = mimetypes.guess_type(path.name)
-    encoded = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime or 'image/png'};base64,{encoded}"
+    subtype = mime.split("/", 1)[1] if mime and "/" in mime else "png"
+    return InlineImage(cid=POST_IMAGE_CID, data=raw, subtype=subtype)
 
 
 def _sources_html(sources: Sequence[SourceRef]) -> str:
@@ -493,19 +507,19 @@ def compose_approval_email(
         if raw_debate:
             body_rows.append(_panel_row(_inset(raw_debate)))
 
-    # IMAGE preview — embedded inline as a data URI when the draft has an image.
-    if has_image and draft.image_path is not None:
-        data_uri = _image_data_uri(draft.image_path)
-        if data_uri is not None:
-            body_rows.append(
-                _panel_row(
-                    f'<div style="color:{theme.TEXT_MUTED};font-size:11px;text-transform:uppercase;'
-                    f'letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">'
-                    f"Image · {_html.escape(draft.image_type)}</div>"
-                    f'<img src="{data_uri}" alt="post image preview" '
-                    f'style="max-width:100%;border-radius:10px;border:1px solid {theme.BORDER};" />'
-                )
+    # IMAGE preview — referenced via cid: and attached as a related part by the
+    # sender (Gmail renders cid:, not data:). Gated on a readable file so we never
+    # emit a broken cid with no backing attachment.
+    if has_image and draft.image_path is not None and Path(draft.image_path).is_file():
+        body_rows.append(
+            _panel_row(
+                f'<div style="color:{theme.TEXT_MUTED};font-size:11px;text-transform:uppercase;'
+                f'letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">'
+                f"Image · {_html.escape(draft.image_type)}</div>"
+                f'<img src="cid:{POST_IMAGE_CID}" alt="post image preview" '
+                f'style="max-width:100%;border-radius:10px;border:1px solid {theme.BORDER};" />'
             )
+        )
 
     # QUALITY REPORT.
     body_rows.append(

@@ -46,6 +46,7 @@ from __future__ import annotations
 import hashlib
 import html as _html
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,7 +75,7 @@ from vision.ingest.sources import get_enabled_sources
 from vision.logging_setup import configure_logging, get_logger
 from vision.mailer.composer import SourceRef, compose_approval_email
 from vision.mailer.dedup import SendDeduper
-from vision.mailer.sender import EmailSender, get_sender
+from vision.mailer.sender import EmailSender, InlineImagePart, get_sender
 from vision.ops.joblock import acquire_job_lock, date_key, release_job_lock
 from vision.synthesise.pipeline import synthesise
 from vision.synthesise.prompts import PromptLibrary
@@ -462,6 +463,7 @@ def _send_approval_email(
     text: str,
     html: str,
     send_deduper: SendDeduper | None,
+    inline_images: Sequence[InlineImagePart] | None = None,
 ) -> bool:
     """Send the approval email per the FR-20 mode; return whether it was sent.
 
@@ -480,7 +482,9 @@ def _send_approval_email(
 
     # Capture the provider's delivery verdict FIRST. Everything after this point is
     # bookkeeping — it must never be able to flip a real delivery back to "unsent".
-    delivered = _resolve_sender(sender, settings).send(subject, text, html)
+    delivered = _resolve_sender(sender, settings).send(
+        subject, text, html, inline_images=inline_images
+    )
     if delivered and send_deduper is not None:
         # Record ONLY after acceptance so a failed send can still be retried. Guard
         # the marker write in its OWN try/except: if ``mark_sent`` raises (e.g. an

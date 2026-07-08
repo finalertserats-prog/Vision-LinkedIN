@@ -7,7 +7,6 @@ email or network I/O ever happens (BRD §18: mock external deps, tests are done)
 
 from __future__ import annotations
 
-import base64
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -22,6 +21,7 @@ from vision.mailer.composer import (
     SourceRef,
     compose_approval_email,
     compose_confirmation_email,
+    inline_image_for,
 )
 from vision.mailer.dedup import SendDeduper
 from vision.mailer.sender import (
@@ -156,6 +156,30 @@ def test_smtp_sender_builds_multipart_mime_and_calls_smtplib() -> None:
     assert "Subject: Subject line" in raw
     assert 'Content-Type: multipart/alternative' in raw
     assert "text/plain" in raw and "text/html" in raw
+
+
+def test_smtp_sender_attaches_inline_cid_image_as_related() -> None:
+    # Arrange: an SMTP send WITH an inline image (the Gmail-safe cid: path).
+    sender = SMTPSender(
+        host="smtp.example.com", port=587, username="u", password="app-password-value",
+        from_addr="vision@example.com", default_to="owner@example.com",
+    )
+    server = MagicMock()
+    with patch("vision.mailer.sender.smtplib.SMTP") as smtp_cls:
+        smtp_cls.return_value.__enter__.return_value = server
+        # Act
+        ok = sender.send(
+            "S", "t", '<img src="cid:vision-post-image">',
+            inline_images=[("vision-post-image", b"\x89PNG\r\n\x1a\nBYTES", "png")],
+        )
+
+    # Assert: the wire message is multipart/related and carries the image part with
+    # a matching Content-ID so an <img src="cid:..."> resolves (Gmail renders this).
+    assert ok is True
+    raw = server.sendmail.call_args.args[2]
+    assert "multipart/related" in raw
+    assert "Content-ID: <vision-post-image>" in raw
+    assert "Content-Type: image/png" in raw
 
 
 def test_smtp_sender_uses_ssl_on_port_465() -> None:
@@ -358,10 +382,13 @@ def test_compose_approval_embeds_image_preview(tmp_path) -> None:
     # Act
     _s, text, html = compose_approval_email(draft, [], _LINKS, settings=_settings(), now=_NOW)
 
-    # Assert: the HTML carries an inline base64 preview; the text notes the image.
-    expected_b64 = base64.b64encode(img.read_bytes()).decode("ascii")
-    assert f"data:image/png;base64,{expected_b64}" in html
+    # Assert: the HTML references the image via cid: (Gmail renders cid:, not data:);
+    # the inline part carries the exact bytes for the sender to attach.
+    assert 'src="cid:vision-post-image"' in html
     assert "IMAGE — type: informative-card" in text
+    part = inline_image_for(str(img), "informative-card")
+    assert part is not None
+    assert part.cid == "vision-post-image" and part.data == img.read_bytes()
 
 
 def test_compose_confirmation_email_contains_post_url() -> None:
@@ -441,10 +468,10 @@ def test_council_email_embeds_approved_image_preview(tmp_path) -> None:
         draft, [], _COUNCIL_LINKS, settings=_settings(), now=_NOW
     )
 
-    # Assert: the council email carries BOTH the council surfaces AND the inline image
-    # preview (the exact bytes, base64-encoded) so the owner proof-reads the picture.
-    expected_b64 = base64.b64encode(img.read_bytes()).decode("ascii")
-    assert f"data:image/png;base64,{expected_b64}" in html
+    # Assert: the council email carries BOTH the council surfaces AND the image,
+    # referenced via cid: (attached by the sender) so the owner proof-reads it.
+    assert 'src="cid:vision-post-image"' in html
+    assert inline_image_for(str(img), "concept-illustration") is not None
     assert "Council" in html  # the council block still renders alongside the image
     assert "IMAGE — type: concept-illustration" in text
 

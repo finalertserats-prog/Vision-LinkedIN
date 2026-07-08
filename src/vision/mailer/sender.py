@@ -23,8 +23,11 @@ from __future__ import annotations
 import logging
 import os
 import smtplib
+import base64
 import socket
 import ssl
+from collections.abc import Sequence
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Protocol, runtime_checkable
@@ -34,6 +37,10 @@ import httpx
 from vision.config import Settings
 
 log = logging.getLogger(__name__)
+
+# One inline image = (content_id, raw_bytes, mime_subtype). A plain tuple (not a
+# composer type) keeps the sender decoupled from the mailer's composer module.
+InlineImagePart = tuple[str, bytes, str]
 
 # Sensible defaults for the SMTP path. Gmail is the documented owner setup
 # (App Password over STARTTLS:587); host/port may be overridden via env for
@@ -57,27 +64,58 @@ class EmailSender(Protocol):
     ordinary send failure so one bad send can't crash the pipeline (§14.5).
     """
 
-    def send(self, subject: str, text: str, html: str, to: str | None = None) -> bool:
-        """Send a multipart plain+HTML email; ``to`` overrides the configured recipient."""
+    def send(
+        self,
+        subject: str,
+        text: str,
+        html: str,
+        to: str | None = None,
+        inline_images: Sequence[InlineImagePart] | None = None,
+    ) -> bool:
+        """Send a multipart plain+HTML email; ``to`` overrides the configured
+        recipient; ``inline_images`` are attached as related cid: parts."""
         ...
 
 
-def _build_message(from_addr: str, to_addr: str, subject: str, text: str, html: str) -> MIMEMultipart:
-    """Assemble a ``multipart/alternative`` message (plain first, HTML second).
+def _build_message(
+    from_addr: str,
+    to_addr: str,
+    subject: str,
+    text: str,
+    html: str,
+    inline_images: Sequence[InlineImagePart] | None = None,
+) -> MIMEMultipart:
+    """Assemble the message: ``multipart/alternative`` (plain→HTML), wrapped in a
+    ``multipart/related`` when inline CID images are supplied.
 
-    WHY this order: mail clients render the LAST acceptable part, so HTML-capable
-    clients show the rich version while plain-text clients fall back to ``text``.
-    Kept as a pure helper so both providers and the tests build the exact same
-    MIME structure.
+    WHY the alternative order: clients render the LAST acceptable part, so HTML
+    clients show the rich version and plain-text clients fall back to ``text``.
+    WHY related-wrap for images: an ``<img src="cid:...">`` only resolves against a
+    sibling image part inside a ``multipart/related`` — which Gmail renders (unlike
+    a ``data:`` URI). Pure helper so providers + tests build identical MIME.
     """
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = from_addr
-    msg["To"] = to_addr
+    alternative = MIMEMultipart("alternative")
     # Attach in fallback→preferred order (RFC 2046 §5.1.4).
-    msg.attach(MIMEText(text, "plain", "utf-8"))
-    msg.attach(MIMEText(html, "html", "utf-8"))
-    return msg
+    alternative.attach(MIMEText(text, "plain", "utf-8"))
+    alternative.attach(MIMEText(html, "html", "utf-8"))
+
+    if not inline_images:
+        alternative["Subject"] = subject
+        alternative["From"] = from_addr
+        alternative["To"] = to_addr
+        return alternative
+
+    root = MIMEMultipart("related")
+    root["Subject"] = subject
+    root["From"] = from_addr
+    root["To"] = to_addr
+    root.attach(alternative)
+    for cid, data, subtype in inline_images:
+        part = MIMEImage(data, _subtype=subtype)
+        part.add_header("Content-ID", f"<{cid}>")
+        part.add_header("Content-Disposition", "inline", filename=f"{cid}.{subtype}")
+        root.attach(part)
+    return root
 
 
 class SMTPSender:
@@ -112,13 +150,19 @@ class SMTPSender:
         if not self._enabled:
             log.debug("SMTPSender not configured (missing password/from); sends will be skipped.")
 
-    def send(self, subject: str, text: str, html: str, to: str | None = None) -> bool:
+    def send(
+        self,
+        subject: str,
+        text: str,
+        html: str,
+        to: str | None = None,
+        inline_images: Sequence[InlineImagePart] | None = None,
+    ) -> bool:
         """Deliver ``subject``/``text``/``html`` over SMTP; return success as a bool.
 
-        Error handling is *specific* (§22): auth, protocol, timeout and network
-        faults are caught separately and logged generically — the exception
-        objects from smtplib do not carry the password, and we never interpolate
-        it into a message.
+        ``inline_images`` are attached as related cid: parts so an HTML preview
+        renders in Gmail. Error handling is *specific* (§22): auth, protocol,
+        timeout and network faults are caught separately and logged generically.
         """
         if not self._enabled:
             log.info("SMTP send skipped: sender not configured.")
@@ -129,7 +173,7 @@ class SMTPSender:
             log.warning("SMTP send skipped: no recipient address.")
             return False
 
-        message = _build_message(self._from, recipient, subject, text, html)
+        message = _build_message(self._from, recipient, subject, text, html, inline_images)
 
         try:
             if self._port == 465:
@@ -193,7 +237,14 @@ class ResendSender:
         if not self._enabled:
             log.debug("ResendSender not configured (missing api key/from); sends will be skipped.")
 
-    def send(self, subject: str, text: str, html: str, to: str | None = None) -> bool:
+    def send(
+        self,
+        subject: str,
+        text: str,
+        html: str,
+        to: str | None = None,
+        inline_images: Sequence[InlineImagePart] | None = None,
+    ) -> bool:
         """POST the email to Resend; return whether it was accepted (2xx)."""
         if not self._enabled:
             log.info("Resend send skipped: sender not configured.")
@@ -206,13 +257,24 @@ class ResendSender:
 
         # Resend accepts both text and html; sending both preserves the plain
         # fallback exactly as the SMTP path does.
-        payload = {
+        payload: dict[str, object] = {
             "from": self._from,
             "to": [recipient],
             "subject": subject,
             "html": html,
             "text": text,
         }
+        if inline_images:
+            # Resend inlines an attachment when it carries a content_id matching the
+            # HTML's cid: reference.
+            payload["attachments"] = [
+                {
+                    "filename": f"{cid}.{subtype}",
+                    "content": base64.b64encode(data).decode("ascii"),
+                    "content_id": f"<{cid}>",
+                }
+                for cid, data, subtype in inline_images
+            ]
         headers = {
             # The key lives here and ONLY here — never in a log line.
             "Authorization": f"Bearer {self._api_key}",

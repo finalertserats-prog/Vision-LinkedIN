@@ -56,7 +56,7 @@ from vision.council.engine import run_council
 from vision.db.models import Draft
 from vision.db.session import get_session
 from vision.logging_setup import configure_logging, get_logger
-from vision.mailer.composer import compose_approval_email
+from vision.mailer.composer import compose_approval_email, inline_image_for
 from vision.mailer.sender import EmailSender
 
 logger = get_logger("vision.cli.council")
@@ -295,8 +295,13 @@ def run_council_cli(
         subject, text, html = compose_approval_email(
             draft, [], links, settings=settings, now=now
         )
+        # Attach the draft's image as an inline cid: part so the preview renders in
+        # Gmail (which strips data: URIs). None for a text-only draft.
+        img = inline_image_for(draft.image_path, draft.image_type)
+        inline_images = [(img.cid, img.data, img.subtype)] if img is not None else None
         email_sent = _send_approval_email(
-            mode, sender, settings, subject, text, html, send_deduper=None
+            mode, sender, settings, subject, text, html, send_deduper=None,
+            inline_images=inline_images,
         )
     except Exception:  # noqa: BLE001 — a compose/send failure must not lose the draft
         # The draft is already committed (step 4); an email hiccup leaves an
