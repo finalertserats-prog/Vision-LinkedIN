@@ -681,6 +681,110 @@ def render_quote_card(
     return data
 
 
+# --- Contrast card (two-panel anime comparison, BRD §13.6 + owner request) ----
+# Layout from agy's design review: 1080x1080, two 540-wide panels, a 4px black
+# center divider, and a semi-transparent black band (Y 860-1040) behind each
+# crisp label. The anime PANELS come TEXT-FREE from agy; the labels are composited
+# deterministically here so text is always legible (diffusion mangles words).
+_CONTRAST_SIZE = 1080
+_CONTRAST_HALF = 540
+_CONTRAST_BAND_TOP = 860
+_CONTRAST_BAND_BOTTOM = 1040
+_CONTRAST_LABEL_FONTS = (104, 92, 80, 68, 58, 48, 40)  # descending auto-fit search
+_CONTRAST_PAD = 34  # horizontal padding inside a panel for the label text
+
+
+def _cover_crop(img: Image.Image, width: int, height: int) -> Image.Image:
+    """Scale ``img`` to COVER a ``width``x``height`` box, then center-crop to fit."""
+    img = img.convert("RGB")
+    scale = max(width / img.width, height / img.height)
+    resized = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))))
+    left = (resized.width - width) // 2
+    top = (resized.height - height) // 2
+    return resized.crop((left, top, left + width, top + height))
+
+
+def _wrap_words(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
+    """Greedy word-wrap ``text`` to lines no wider than ``max_w`` (1-3 word labels)."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        trial = f"{current} {word}".strip()
+        if not current or _text_width(draw, trial, font) <= max_w:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _draw_band_label(
+    draw: ImageDraw.ImageDraw, text: str, panel_x0: int, band_top: int, band_bottom: int
+) -> None:
+    """Auto-fit + center a bold ALL-CAPS label inside one panel's overlay band."""
+    max_w = _CONTRAST_HALF - 2 * _CONTRAST_PAD
+    max_h = (band_bottom - band_top) - 24
+    font = _font(_CONTRAST_LABEL_FONTS[-1])
+    lines = [text]
+    for size in _CONTRAST_LABEL_FONTS:
+        font = _font(size)
+        lines = _wrap_words(draw, text, font, max_w)
+        line_h = size + 8
+        widest = max((_text_width(draw, ln, font) for ln in lines), default=0)
+        if line_h * len(lines) <= max_h and widest <= max_w:
+            break
+    line_h = font.size + 8
+    total_h = line_h * len(lines)
+    start_y = band_top + ((band_bottom - band_top) - total_h) // 2
+    for i, line in enumerate(lines):
+        line_w = _text_width(draw, line, font)
+        line_x = panel_x0 + (_CONTRAST_HALF - line_w) // 2
+        draw.text((line_x, start_y + i * line_h), line, font=font, fill=_WHITE)
+
+
+def render_contrast_card(
+    left_panel: bytes,
+    right_panel: bytes,
+    left_label: str,
+    right_label: str,
+    *,
+    settings: Settings | None = None,
+) -> bytes:
+    """Composite two anime panels + crisp labels into a 1080x1080 contrast card.
+
+    ``left_panel``/``right_panel`` are text-free PNG bytes (from agy); the labels
+    are drawn deterministically over a readable band so the words are always crisp.
+    """
+    settings = settings or get_settings()
+    canvas = Image.new("RGB", (_CONTRAST_SIZE, _CONTRAST_SIZE), _FALLBACK_NAVY)
+    canvas.paste(_cover_crop(Image.open(io.BytesIO(left_panel)), _CONTRAST_HALF, _CONTRAST_SIZE), (0, 0))
+    canvas.paste(
+        _cover_crop(Image.open(io.BytesIO(right_panel)), _CONTRAST_HALF, _CONTRAST_SIZE),
+        (_CONTRAST_HALF, 0),
+    )
+
+    # Divider + the two readability bands, composited as one RGBA layer.
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    od = ImageDraw.Draw(overlay)
+    od.rectangle([_CONTRAST_HALF - 2, 0, _CONTRAST_HALF + 2, _CONTRAST_SIZE], fill=(0, 0, 0, 255))
+    for x0 in (0, _CONTRAST_HALF):
+        od.rectangle(
+            [x0, _CONTRAST_BAND_TOP, x0 + _CONTRAST_HALF, _CONTRAST_BAND_BOTTOM], fill=(0, 0, 0, 180)
+        )
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB")
+
+    draw = ImageDraw.Draw(canvas)
+    _draw_band_label(draw, left_label.upper().strip(), 0, _CONTRAST_BAND_TOP, _CONTRAST_BAND_BOTTOM)
+    _draw_band_label(
+        draw, right_label.upper().strip(), _CONTRAST_HALF, _CONTRAST_BAND_TOP, _CONTRAST_BAND_BOTTOM
+    )
+    # Respect the owner's signature mode (off => no stamp; no forced AI attribution).
+    _draw_watermark(canvas, settings)
+    return _png_bytes(canvas)
+
+
 def render_chart(spec: CardSpec, settings: Settings | None = None) -> bytes:
     """Render a simple bar/line chart as PNG bytes at 1200x1200.
 

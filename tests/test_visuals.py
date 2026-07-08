@@ -27,6 +27,7 @@ from vision.visuals.card_renderer import (
     LINKEDIN_LANDSCAPE,
     LINKEDIN_SQUARE,
     render_chart,
+    render_contrast_card,
     render_quote_card,
     render_stat_card,
 )
@@ -179,6 +180,38 @@ def test_render_stat_card_invalid_palette_color_degrades_to_default() -> None:
 
 
 # --- render_quote_card ------------------------------------------------------
+
+
+def _panel(color: tuple[int, int, int]) -> bytes:
+    """A stand-in anime panel: a plain colored PNG of odd size (tests cover-crop)."""
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 1200), color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_render_contrast_card_composites_1080_square_with_labels() -> None:
+    data = render_contrast_card(
+        _panel((30, 60, 120)),
+        _panel((120, 60, 30)),
+        "AI FIRST",
+        "FOUNDATIONS FIRST",
+        settings=_settings(),
+    )
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == (1080, 1080)
+        # The center divider is black: sample a pixel on the seam.
+        assert image.convert("RGB").getpixel((540, 400)) == (0, 0, 0)
+
+
+def test_render_contrast_card_handles_long_multiword_labels() -> None:
+    # A 3-word label must wrap + shrink to fit, never raise or overflow.
+    data = render_contrast_card(
+        _panel((10, 10, 10)), _panel((200, 200, 200)),
+        "MOVE FAST BREAK", "BUILD TO LAST", settings=_settings(),
+    )
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.size == (1080, 1080)
 
 
 def test_render_quote_card_returns_png_of_exact_square_dimensions() -> None:
