@@ -1,183 +1,252 @@
-"""Concept-illustration image client over the council CLI (BRD §13.6 / FR-23).
+"""Concept-illustration image client over the CONFIRMED-WORKING agy path (BRD §13.6 / FR-23).
 
 WHY this module exists: the visual lane's *concept-illustration* case needs a
-text-free abstract image from a diffusion model, generated CLI-only (no API
-keys, §22). This client shells to the council image scripts and returns raw
-image bytes for the caller to embed in the approval email / upload to LinkedIn.
+text-free abstract image, generated CLI-only (no API keys, §22). The
+CONFIRMED-WORKING path (verified live 2026-07-08) is **agy** (Antigravity /
+Gemini) driven as an AGENT under the owner's subscription — NO API key. agy
+GENERATES and SAVES a real PNG to a path we hand it; this client then reads the
+bytes back. The legacy ``gemini`` CLI is DEAD (IneligibleTierError) and
+``gemini_image.sh`` does not work, so agy is THE AI-image path.
+
+PRECISION RULE (BRD §13.6 / D10): anything carrying NUMBERS or WORDS is rendered
+DETERMINISTICALLY (Pillow/matplotlib cards) elsewhere — NEVER through agy, which
+mangles text/figures. agy is for TEXT-FREE concept illustrations only, so every
+prompt is hardened with 'no text, no words, no letters, no logos'.
 
 Critical contract (BRD §13.6 guardrail): image generation MUST *degrade
-gracefully* — a failure raises ``ImageGenerationError`` so the caller falls
+gracefully* — any failure raises ``ImageGenerationError`` so the caller falls
 back to a text-only post and NEVER blocks publishing. This is the deliberate
 difference from the text passes, which fail the whole run.
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import subprocess
 import tempfile
 from pathlib import Path
+
+from PIL import Image, UnidentifiedImageError
 
 from vision.brahmastra.errors import ImageGenerationError
 from vision.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
-# PNG / JPEG magic-number prefixes. WHY: when a lane streams image bytes on
-# stdout (rather than writing a file), we use these to confirm we actually got
-# an image and not a text error message, before returning it as bytes.
+# PNG / JPEG magic-number prefixes. WHY: after agy exits we read the saved file
+# and confirm it actually begins with an image magic number (not a text error
+# message agy might have written) before trusting/returning it.
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _JPEG_MAGIC = b"\xff\xd8\xff"
 
+# Mandatory text-free negatives appended to EVERY agy prompt. WHY hard-coded (not
+# only config): the precision rule (§13.6/D10) is non-negotiable — agy/diffusion
+# must never bake words/numbers/logos into an illustration, regardless of the
+# owner-editable style guide. The style guide sets taste; this guarantees safety.
+_TEXT_FREE_NEGATIVES = "no text, no words, no letters, no logos"
+
 
 class BrahmastraImageClient:
-    """Adapter that generates concept illustrations via the council image CLIs.
+    """Adapter that generates concept illustrations by driving agy as an agent.
 
-    Routing is model-driven and config-first (``IMAGE_MODEL``): a Gemini-family
-    model rides ``gemini_call.sh image`` (which writes a PNG to a path), while a
-    Codex / gpt-image model rides ``codex_call.sh image`` (built-in gpt-image).
-    Either way ``illustrate`` returns raw bytes or raises ``ImageGenerationError``.
+    ``illustrate`` builds a text-free, style-guided prompt, runs the configured
+    ``agy`` binary (``AGY_BIN``) as an agent that SAVES a PNG to a tempfile, then
+    reads and validates those bytes — converting a JPEG to PNG if agy saved one.
+    On any failure it raises ``ImageGenerationError`` so the caller degrades to a
+    text-only post (image never blocks publishing, §13.6).
     """
 
     def __init__(
         self,
         settings: Settings | None = None,
         *,
-        timeout: float = 180.0,
-        bash_executable: str = "bash",
+        timeout: float = 200.0,
     ) -> None:
-        """Wire the image client to config and the bash launcher.
+        """Wire the image client to config.
 
-        Args mirror ``BrahmastraClient`` for consistency: ``settings`` supplies
-        the council dir + default image model, ``timeout`` bounds a hung
-        generation, and ``bash_executable`` is configurable for non-standard
-        hosts (config over code, §22.6).
+        Args:
+            settings: Config source (agy binary path + style guide). Defaults to
+                the process-wide singleton.
+            timeout: Per-attempt bound (seconds) on a hung agy run. WHY ~200s:
+                agy generates as an agent (slower than a raw API), so it needs a
+                generous ceiling while still guaranteeing the run cannot hang
+                forever. Configurable for non-standard hosts (config over code, §22.6).
         """
         self._settings = settings or get_settings()
         self._timeout = timeout
-        self._bash = bash_executable
-        self._council_dir: Path = Path(self._settings.brahmastra_council_dir)
+        # Snapshot the configured binary once. Never logged with a prompt/secret.
+        self._agy_bin: str = self._settings.agy_bin
 
     def illustrate(self, prompt: str, model: str | None = None) -> bytes:
-        """Generate a concept illustration and return its raw image bytes.
+        """Generate a text-free concept illustration and return its PNG bytes.
 
         Args:
-            prompt: The (text-free-styled) illustration prompt. The caller is
-                responsible for prepending the fixed style guide (§13.6) — this
-                adapter is a dumb transport, mirroring ``BrahmastraClient``.
-            model: Override the configured ``IMAGE_MODEL``. WHY configurable:
-                image model IDs churn frequently, so they live in config, never
-                in code (§13.6 note).
+            prompt: The conceptual illustration prompt. It is hardened here with
+                the configured style guide + the mandatory text-free negatives, so
+                agy can never bake words/numbers/logos into the image (§13.6/D10).
+            model: Accepted for interface symmetry with ``BrahmastraClient`` but
+                unused — agy is THE (single) AI-image path in this build. Kept so
+                callers need not special-case the image client's signature.
 
         Returns:
-            Raw image bytes (PNG/JPEG) suitable for email embed / LinkedIn upload.
+            Raw PNG bytes suitable for email embed / LinkedIn upload.
 
         Raises:
-            ImageGenerationError: On any failure. The caller MUST catch this and
-                degrade to a text-only post (BRD §13.6 — image never blocks pub).
+            ImageGenerationError: On ANY failure (timeout, launch error, no file,
+                or a non-image file). The caller MUST catch this and degrade to a
+                text-only post (BRD §13.6 — image never blocks publishing).
         """
-        chosen = (model or self._settings.image_model or "").lower()
-        # Route by model family. Codex/gpt-image models use the codex built-in
-        # image path; everything else defaults to the Gemini image path (the
-        # primary, file-based generator).
-        if "codex" in chosen or "gpt-image" in chosen or "gpt_image" in chosen:
-            return self._illustrate_via_codex(prompt, chosen)
-        return self._illustrate_via_gemini(prompt)
+        # ``model`` is intentionally ignored: agy is the only working AI-image
+        # lane. Referencing it documents the deliberate no-op for readers.
+        _ = model
+        styled_prompt = self._build_styled_prompt(prompt)
 
-    # -- Gemini path (file-based) ------------------------------------------
+        # One retry: a single transient agy hiccup (timeout/launch flake) should
+        # not cost the image. Attempt indices 0 and 1 → initial + one retry.
+        last_error: ImageGenerationError | None = None
+        for attempt in range(2):
+            try:
+                return self._run_agy_once(styled_prompt)
+            except ImageGenerationError as exc:
+                last_error = exc
+                logger.warning(
+                    "agy illustration attempt %d/2 failed: %s", attempt + 1, exc
+                )
 
-    def _illustrate_via_gemini(self, prompt: str) -> bytes:
-        """Generate via ``gemini_call.sh image`` which writes a PNG to a path.
+        # Both attempts exhausted → surface the last failure for graceful degrade.
+        assert last_error is not None  # loop always ran ≥1 iteration
+        raise last_error
 
-        WHY a temp file: ``gemini_call.sh image`` delegates to
-        ``gemini_image.sh "prompt" <output_path> <type>``, which SAVES the
-        image to ``output_path`` rather than streaming bytes. We hand it a
-        NamedTemporaryFile path, run the CLI, then read the bytes back — cleaning
-        up the temp file regardless of outcome.
+    # -- Prompt hardening ---------------------------------------------------
+
+    def _build_styled_prompt(self, prompt: str) -> str:
+        """Prepend the style guide + mandatory text-free negatives to ``prompt``.
+
+        WHY prepend the guide: the owner-editable ``IMAGE_STYLE_GUIDE`` (config
+        over code, §22.6) sets the house aesthetic, and the fixed negatives make
+        the image safe under the precision rule no matter how the concept was
+        phrased. Both lead so agy reads the constraints first.
         """
-        script_path = str(self._council_dir / "gemini_call.sh")
+        guide = self._settings.image_style_guide.strip().rstrip(".")
+        concept = prompt.strip()
+        return f"{guide}, {_TEXT_FREE_NEGATIVES}. {concept}"
 
-        # Create a temp path but close the handle immediately: the CLI (a
-        # separate process) needs to open+write the file itself on all platforms.
+    # -- agy invocation -----------------------------------------------------
+
+    def _run_agy_once(self, styled_prompt: str) -> bytes:
+        """Run agy as an agent once: it saves a PNG to a temp path we then read.
+
+        WHY a tempfile: agy (like the confirmed invocation) WRITES the PNG to an
+        absolute output path rather than streaming bytes. We create the path,
+        instruct agy to save there, run it, then read+validate the bytes — always
+        cleaning up the temp artifact regardless of outcome.
+        """
+        # Create a temp path but close the handle immediately: agy (a separate
+        # process) must open+write the file itself on all platforms.
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
-            out_path = Path(handle.name)
+            out_path = Path(handle.name).resolve()
+
+        # The agent must be allowed to write inside the project working dir; the
+        # confirmed invocation passes the absolute CWD via --add-dir.
+        abs_cwd = str(Path.cwd().resolve())
+
+        # Exact confirmed-working agent form (verified live 2026-07-08). The -p
+        # prompt tells agy to GENERATE, SAVE to the absolute path, and confirm.
+        agent_prompt = (
+            "Use your image generation capability to create an image: "
+            f"{styled_prompt}. Save the generated PNG to {out_path}. "
+            "Confirm the file path when done."
+        )
+        cmd = [
+            self._agy_bin,
+            "--add-dir",
+            abs_cwd,
+            "--dangerously-skip-permissions",
+            "-p",
+            agent_prompt,
+        ]
 
         try:
-            # Positional layout consumed by gemini_call.sh → gemini_image.sh:
-            #   $1 prompt  $2 mode(image)  $3 output_path  $4 type
-            self._run_image_subprocess(
-                [self._bash, script_path, prompt, "image", str(out_path), "illustration"]
-            )
-
-            # Success is defined by a non-empty file existing on disk. An empty
-            # or missing file means the generator failed — degrade gracefully.
-            if out_path.exists() and out_path.stat().st_size > 0:
-                return out_path.read_bytes()
-
-            raise ImageGenerationError(
-                "Gemini image lane produced no output file "
-                f"(expected non-empty {out_path})"
-            )
+            self._launch(cmd)
+            return self._read_and_normalise(out_path)
         finally:
-            # Always remove the temp artifact so failed runs don't leak files.
+            # Always remove the temp artifact so failed/successful runs don't leak.
             out_path.unlink(missing_ok=True)
 
-    # -- Codex path (stdout-based) -----------------------------------------
+    def _launch(self, cmd: list[str]) -> subprocess.CompletedProcess:
+        """Run the agy command with a timeout, normalising launch failures.
 
-    def _illustrate_via_codex(self, prompt: str, model: str) -> bytes:
-        """Generate via ``codex_call.sh image`` (built-in gpt-image).
-
-        WHY capture bytes: the codex image mode streams to stdout rather than a
-        file. We capture raw bytes and only accept output that begins with a
-        known image magic number — anything else (a text error/echo) is treated
-        as a failure and degraded gracefully.
-        """
-        script_path = str(self._council_dir / "codex_call.sh")
-
-        completed = self._run_image_subprocess(
-            [self._bash, script_path, prompt, "image"], capture_bytes=True
-        )
-        # ``stdout`` here is bytes because capture_bytes routes text=False.
-        data: bytes = completed.stdout or b""
-
-        # Validate we actually received image bytes, not an error message.
-        if data.startswith(_PNG_MAGIC) or data.startswith(_JPEG_MAGIC):
-            return data
-
-        raise ImageGenerationError(
-            f"Codex image lane ({model!r}) did not return recognisable image bytes"
-        )
-
-    # -- Shared subprocess runner ------------------------------------------
-
-    def _run_image_subprocess(
-        self, cmd: list[str], *, capture_bytes: bool = False
-    ) -> subprocess.CompletedProcess:
-        """Run an image CLI command with timeout, normalising failures.
-
-        WHY funnel through one method: it is the single external boundary (mock
-        point for tests) and the single place we convert low-level subprocess
-        failures into ``ImageGenerationError`` so the caller only ever needs to
-        catch that one type for graceful degradation.
-
-        ``capture_bytes`` selects binary stdout (codex streams raw image bytes)
-        vs. text (gemini writes a file and prints only status text).
+        WHY funnel through one method: it is the single external boundary (the
+        mock point for tests) and the single place low-level subprocess failures
+        become ``ImageGenerationError`` — so the caller only ever catches that
+        one type for graceful degradation. Note: the prompt (never a secret) is
+        passed as an argv element and is not logged here.
         """
         try:
-            # text=not capture_bytes → binary stdout when we expect image bytes.
+            # text=True: agy prints status text (path confirmation) to stdout; the
+            # image itself arrives via the saved file, not stdout.
             return subprocess.run(
                 cmd,
                 capture_output=True,
-                text=not capture_bytes,
+                text=True,
                 timeout=self._timeout,
             )
         except subprocess.TimeoutExpired as exc:
             # Bounded hang → graceful image failure (never blocks publishing).
             raise ImageGenerationError(
-                f"Image generation timed out after {self._timeout}s"
+                f"agy image generation timed out after {self._timeout}s"
             ) from exc
         except (OSError, subprocess.SubprocessError) as exc:
-            # Launch/subprocess errors (bash missing, script unreadable, etc.).
+            # Launch/subprocess errors (agy binary missing, not executable, etc.).
             raise ImageGenerationError(
-                f"Image generation subprocess failed: {exc}"
+                f"agy image generation subprocess failed: {exc}"
+            ) from exc
+
+    def _read_and_normalise(self, out_path: Path) -> bytes:
+        """Read the agy-saved file, validate it is an image, return PNG bytes.
+
+        Accepts a PNG as-is. If agy saved a JPEG, loads it with Pillow and
+        re-encodes to PNG so the downstream LinkedIn contract (PNG/JPEG,
+        validated separately) always receives a real, normalised image. Anything
+        else (missing/empty file, or a text error masquerading as an image) is an
+        image failure → ``ImageGenerationError`` for graceful degradation.
+        """
+        # A missing or empty file means agy produced no image — degrade.
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            raise ImageGenerationError(
+                f"agy produced no output file (expected non-empty {out_path})"
+            )
+
+        data = out_path.read_bytes()
+
+        if data.startswith(_PNG_MAGIC):
+            # Already the desired format — return the exact saved bytes.
+            return data
+
+        if data.startswith(_JPEG_MAGIC):
+            # agy saved a JPEG this run: load + convert to PNG. WHY convert (not
+            # just pass through): a single, predictable output format keeps the
+            # embed/upload path simple and guarantees a lossless PNG downstream.
+            return self._jpeg_to_png(data)
+
+        # No recognised image magic → a text error or garbage, not an image.
+        raise ImageGenerationError(
+            "agy output file is not a recognisable PNG/JPEG image"
+        )
+
+    @staticmethod
+    def _jpeg_to_png(data: bytes) -> bytes:
+        """Convert JPEG bytes to PNG bytes via Pillow, or fail as an image error."""
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                return buffer.getvalue()
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            # Specific decode failures only (no bare except, §22): a payload Pillow
+            # cannot parse is not an image we can safely return.
+            raise ImageGenerationError(
+                f"agy saved a JPEG that could not be converted to PNG: {exc}"
             ) from exc

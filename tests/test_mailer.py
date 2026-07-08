@@ -426,6 +426,29 @@ def test_council_email_escapes_transcript_and_council_names() -> None:
     assert "&lt;script&gt;steal()&lt;/script&gt;" in html
 
 
+def test_council_email_embeds_approved_image_preview(tmp_path) -> None:
+    # Arrange: a COUNCIL draft that also carries an owner-approved (text-free) image.
+    # The approval email must show that image inline so the owner can proof-read the
+    # visual BEFORE it is published — the same inline-preview guarantee as a news
+    # draft, applied to the council path. A real (tiny) file is written so the
+    # composer inlines its exact bytes as a base64 data URI (no network, no gen).
+    img = tmp_path / "concept.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nCOUNCILCONCEPTBYTES")
+    draft = _council_draft(image_type="concept-illustration", image_path=str(img))
+
+    # Act.
+    _s, text, html = compose_approval_email(
+        draft, [], _COUNCIL_LINKS, settings=_settings(), now=_NOW
+    )
+
+    # Assert: the council email carries BOTH the council surfaces AND the inline image
+    # preview (the exact bytes, base64-encoded) so the owner proof-reads the picture.
+    expected_b64 = base64.b64encode(img.read_bytes()).decode("ascii")
+    assert f"data:image/png;base64,{expected_b64}" in html
+    assert "Council" in html  # the council block still renders alongside the image
+    assert "IMAGE — type: concept-illustration" in text
+
+
 def test_council_email_missing_overrule_link_fails_closed() -> None:
     # Arrange: a council links map lacking 'overrule' must raise, never a dead link.
     partial = {k: v for k, v in _COUNCIL_LINKS.items() if k != "overrule"}

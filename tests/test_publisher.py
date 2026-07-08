@@ -573,6 +573,83 @@ def test_council_publish_omits_signature_when_signature_mode_off(
     assert "Powered by Brahmastra" not in sent_text
 
 
+# --- Council publish WITH an approved image: upload → publish_with_image ------
+
+
+def test_council_publish_with_image_attaches_image_urn(
+    db_session: Session, tmp_path: Path
+) -> None:
+    # Arrange: a COUNCIL draft that ALSO carries an owner-approved (text-free) image.
+    # The published copy is still the council body (assembled by _compose_council_text),
+    # but because a valid image is present the worker must take the IMAGE path: upload
+    # the bytes, then publish_with_image referencing the returned image URN — never the
+    # text-only path. This is the end-to-end council+image case the BRD requires.
+    settings = _make_settings(VisionEnv.LIVE, signature=SignatureMode.OFF)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    image_file = tmp_path / "concept.png"
+    image_file.write_bytes(b"\x89PNG-council-concept-bytes")
+    draft = _seed_council_draft(db_session, council_block="• A\n• B\n• C")
+    # Stamp the approved image onto the same council draft (visual lane output).
+    draft.image_type = "concept-illustration"
+    draft.image_path = str(image_file)
+    db_session.add(draft)
+    db_session.commit()
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: the image was uploaded and the post went out via publish_with_image
+    # carrying the image URN — NOT the text-only path — and the URN is persisted.
+    client.upload_image.assert_called_once()
+    client.publish_with_image.assert_called_once()
+    client.publish_text.assert_not_called()
+    # publish_with_image(access_token, author_urn, text, image_urn): the 4th positional
+    # arg is the attached image URN, proving the council post carries the approved image.
+    assert client.publish_with_image.call_args.args[3] == _IMAGE_URN
+    # The published body is the bare council body (signature OFF), never a Council block.
+    posted_text = client.publish_with_image.call_args.args[2]
+    assert "one right answer" in posted_text
+    assert "• A" not in posted_text
+    assert draft.image_urn == _IMAGE_URN
+    assert draft.post_urn == _POST_URN
+    assert draft.state == "published"
+
+
+# --- Image read failure degrades to a text-only publish (never blocks) --------
+
+
+def test_unreadable_image_degrades_to_text_publish(
+    db_session: Session, tmp_path: Path
+) -> None:
+    # Arrange: an approved draft whose image path points at a file that CANNOT be read
+    # (it does not exist on disk). Per BRD §13.6 an image must NEVER block a publish —
+    # a read failure degrades to a text-only post. We assert the worker's own
+    # _load_image_bytes degradation by pointing image_path at a missing file, so the
+    # bytes load returns None and the text path is taken. No network, no real image.
+    settings = _make_settings(VisionEnv.LIVE)
+    client = _mock_client()
+    mailer = Mock()
+    _seed_token(db_session)
+    missing_image = tmp_path / "vanished.png"  # deliberately never created
+    draft = _seed_draft(
+        db_session, image_type="informative-card", image_path=str(missing_image)
+    )
+
+    # Act.
+    _publisher(settings, client, mailer).publish(db_session, draft)
+
+    # Assert: the image lane degraded — no upload, no image publish — and the post went
+    # out text-only and succeeded (the missing image never blocked publishing).
+    client.upload_image.assert_not_called()
+    client.publish_with_image.assert_not_called()
+    client.publish_text.assert_called_once()
+    assert draft.image_urn is None
+    assert draft.post_urn == _POST_URN
+    assert draft.state == "published"
+
+
 # --- FINAL de-naming gate: a leaked AI name aborts publish (fail-closed) ------
 
 

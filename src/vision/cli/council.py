@@ -196,6 +196,15 @@ def _build_council_draft(payload: dict[str, Any], settings: Settings) -> Draft:
         # The two new council columns — the whole point of this lane.
         content_mode=_CONTENT_MODE_COUNCIL,
         council_meta=council_meta,
+        # Image lane (§13.6): the engine already decided + generated the visual and
+        # wrote the PNG, stamping these fields on the payload. Map them onto the
+        # Draft's image_* columns so the mailer + publisher attach the image. A
+        # text-only draft carries image_type 'none' with a NULL path (the default),
+        # so ``.get(..., 'none')`` keeps an image-less payload valid.
+        image_type=payload.get("image_type", "none"),
+        image_path=payload.get("image_path"),
+        image_source=payload.get("image_source"),
+        image_prompt=payload.get("image_prompt"),
     )
 
 

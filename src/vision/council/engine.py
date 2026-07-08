@@ -24,6 +24,7 @@ from vision.council.compose import Composer
 from vision.council.deliberate import Deliberation, Deliberator
 from vision.council.formats import RecentFormatStore
 from vision.council.topics import TopicEngine
+from vision.council.visual import attach_council_image
 from vision.council.voices import VOICE_ORDER, Voices
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,10 @@ def run_council(
               "council_block": str,
               "transcript": {voice: {"round1", "round2"}},  # raw, never published
               "model_trace": {...},                          # per-stage provenance
+              "image_type": str,        # 'none'|'quote_card'|'concept_illustration'
+              "image_path": str | None, # written PNG (None when text-only)
+              "image_source": str | None,  # 'deterministic' | '<model-id>'
+              "image_prompt": str | None,  # concept prompt (None for a card)
             }
 
     Raises:
@@ -129,7 +134,7 @@ def run_council(
         "format": composed.format,
         "situation": composed.situation,
     }
-    return {
+    draft: dict[str, Any] = {
         "content_mode": _CONTENT_MODE,
         "topic": chosen_topic,
         "format": composed.format,
@@ -140,3 +145,14 @@ def run_council(
         "transcript": _build_transcript(deliberation),
         "model_trace": model_trace,
     }
+
+    # 5. IMAGE LANE (BRD §13.6). A best-effort visual decision runs AFTER compose:
+    #    it may attach a DETERMINISTIC quote card (a strong one-line punchline) or
+    #    a TEXT-FREE agy concept illustration, respecting the weekly cap +
+    #    rotation (config-driven, not every post). It DEGRADES GRACEFULLY — any
+    #    failure leaves the draft text-only and NEVER blocks the post — and sets
+    #    the draft's image_type/image_path/image_source/image_prompt in place so
+    #    the mailer + publisher pick the image up.
+    attach_council_image(draft, settings=settings)
+
+    return draft

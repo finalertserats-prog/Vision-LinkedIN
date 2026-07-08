@@ -153,6 +153,40 @@ class Settings(BaseSettings):
         default="prep/.council_state.json", alias="COUNCIL_STATE_PATH"
     )
 
+    # --- Council image lane (BRD §13.6 wired into the council) -------------
+    # WHY these live in Settings (config over code, §22.6): whether the council
+    # attaches an image, HOW OFTEN, and WHERE the PNGs land are all owner-editable
+    # knobs — never baked into code. The council image lane is a best-effort
+    # enhancement that MUST degrade to text-only on any failure (§13.6), so its
+    # policy is config, not hard-coded branching.
+    #
+    # Master on/off for the council image lane specifically (separate from the
+    # global IMAGE_ENABLED so the owner can silence council images without
+    # touching the news lane). Fail-closed default OFF: an un-configured checkout
+    # never attaches a council image by accident (§22.9).
+    council_image_enabled: bool = Field(
+        default=False, alias="COUNCIL_IMAGE_ENABLED"
+    )
+    # Rotation heuristic: attach an image on roughly 1-in-N council posts so a
+    # council draft is NOT image-heavy (the post is the idea; the image is
+    # occasional seasoning). 1 => every eligible post; a larger N spaces them out.
+    council_image_every_n: int = Field(
+        default=3, alias="COUNCIL_IMAGE_EVERY_N"
+    )
+    # Directory the rendered/generated council PNGs are written to (the mailer +
+    # publisher later read ``draft.image_path`` from here). Expanduser'd at read
+    # time. Default under the system temp dir so a bare checkout works; prod points
+    # it at a durable volume.
+    council_image_dir: str = Field(
+        default="", alias="COUNCIL_IMAGE_DIR"
+    )
+    # Where the council image lane persists its weekly-cap ledger + rotation
+    # counter (a small JSON state file, expanduser'd). Kept separate from the
+    # format-variety state so the two concerns never collide on disk.
+    council_image_state_path: str = Field(
+        default="prep/.council_image_state.json", alias="COUNCIL_IMAGE_STATE_PATH"
+    )
+
     # --- Content -----------------------------------------------------------
     recency_hours: int = Field(default=48, alias="RECENCY_HOURS")
     grounding_min_pct: int = Field(default=100, alias="GROUNDING_MIN_PCT")
@@ -161,6 +195,15 @@ class Settings(BaseSettings):
     # --- Images / visuals (§13.6) -----------------------------------------
     image_enabled: bool = Field(default=True, alias="IMAGE_ENABLED")
     image_model: str = Field(default="gemini-image", alias="IMAGE_MODEL")
+    # The CONFIRMED-WORKING AI-image path (verified live 2026-07-08): agy
+    # (Antigravity/Gemini) runs as an AGENT under the owner's subscription — NO
+    # API key — and writes real PNGs to a path. WHY config not code (§22.6): the
+    # binary location varies per host, and the legacy 'gemini' CLI / gemini_image.sh
+    # path is DEAD (IneligibleTierError), so the working launcher must be an
+    # owner-editable knob, never hard-coded. Default is the verified install path.
+    agy_bin: str = Field(
+        default="/c/Users/vishn/AppData/Local/agy/bin/agy", alias="AGY_BIN"
+    )
     image_max_per_week: int = Field(default=4, alias="IMAGE_MAX_PER_WEEK")
     image_style_guide: str = Field(
         default="minimal, professional, muted palette, no text, no logos",

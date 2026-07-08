@@ -355,14 +355,18 @@ class Composer:
                 )
                 raise ForbiddenNameError(leak)
 
-            # Parse-miss guard — an empty post OR council block means the editor did
-            # not emit the expected sections. Retry rather than return an empty draft
-            # (a silent failure for an autonomous pipeline). This is the bug that let
-            # an empty 'quiet_observation' post through before.
-            if not composed.post_text.strip() or not composed.council_block.strip():
-                last_error = "parse miss: empty post or council block"
+            # Parse-miss guard — an empty POST body means the editor didn't emit the
+            # POST section; retry rather than return an empty draft (silent failure).
+            # The COUNCIL block is now OPTIONAL: the public post no longer includes it
+            # (owner removed it), so a dropped Council section is NOT a failure — we
+            # just proceed without it (the email loses that context, but the post is
+            # fine). Only an empty POST body is a real parse miss worth retrying.
+            if not composed.post_text.strip():
+                last_error = "parse miss: empty post body"
                 logger.warning("Council compose parse miss; retrying.", extra={"attempt": attempt})
                 continue
+            if not composed.council_block.strip():
+                logger.info("Council block empty (optional) — proceeding without it.")
 
             # Success: record the format (only real, known formats) and return.
             if composed.format in FORMATS:

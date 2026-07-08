@@ -86,6 +86,26 @@ _DATAPOINT_FONTS: dict[int, tuple[int, int]] = {1: (72, 30), 2: (64, 30), 3: (48
 # Descending value sizes tried when a row must shrink further to fit its slot.
 _VALUE_FONT_LADDER: tuple[int, ...] = (72, 64, 56, 48, 40, 34, 28)
 
+# --- Quote-card layout geometry (px) ---------------------------------------
+# WHY separate constants from the stat card: a quote is prose, not numbers, so
+# the layout is a single centred block that grows/shrinks to fill the canvas
+# (no per-datapoint stepping). These govern the margins and the auto-fit search.
+_QUOTE_MARGIN_X = 110  # generous side gutters so wrapped prose breathes
+_QUOTE_MARGIN_TOP = 150  # room below for the gold accent + opening quote mark
+_QUOTE_MARGIN_BOTTOM = 150  # room above the attribution / watermark footer
+# Descending body font sizes tried by the auto-fit search: start large for a
+# short quote, shrink until the wrapped block fits the vertical budget.
+_QUOTE_FONT_LADDER: tuple[int, ...] = (96, 84, 72, 64, 56, 48, 42, 38, 34)
+# Absolute floor on wrapped lines: at the smallest font this many lines fill the
+# canvas, so beyond it the final line is ellipsised (truncate-within-bounds).
+_QUOTE_MAX_LINES = 12
+_QUOTE_LINE_SPACING = 1.18  # multiplier on line height for readable leading
+_QUOTE_MARK_FONT = 160  # the big decorative opening quotation mark
+_QUOTE_ACCENT_RULE_W = 140  # width of the short gold accent rule under the mark
+_QUOTE_ACCENT_RULE_H = 6
+_QUOTE_ATTRIB_FONT = 34  # attribution line ("— Someone") font size
+_QUOTE_ATTRIB_FROM_BOTTOM = 90  # attribution baseline = height - this
+
 
 def _parse_palette(raw: str) -> dict[str, str]:
     """Parse ``'navy=#0B1F3A;gold=#C9A24B'`` into ``{'navy': '#0B1F3A', ...}``.
@@ -521,6 +541,143 @@ def render_stat_card(spec: CardSpec, settings: Settings | None = None) -> bytes:
 
     data = _png_bytes(image)
     _assert_dimensions(data, LINKEDIN_LANDSCAPE)
+    return data
+
+
+def _fit_quote_block(
+    draw: ImageDraw.ImageDraw,
+    quote: str,
+    max_width: int,
+    max_height: int,
+) -> tuple[list[str], ImageFont.FreeTypeFont, int]:
+    """Auto-fit a quote into ``max_width`` x ``max_height`` and return the block.
+
+    Walks ``_QUOTE_FONT_LADDER`` from large to small, wrapping the quote at each
+    size, and returns the FIRST size whose wrapped block fits the vertical budget
+    — so a short quote renders large and a long quote shrinks gracefully. If even
+    the smallest font cannot fit, the block is wrapped at ``_QUOTE_MAX_LINES`` and
+    the overflow is folded into an ellipsised final line by ``_wrap_lines`` (the
+    truncate-within-bounds guarantee, §13.6). WHY a search rather than a formula:
+    line count after greedy wrapping is font-dependent and not closed-form, so an
+    empirical descent is the reliable, deterministic way to pick the largest fit.
+
+    Returns:
+        A ``(lines, font, line_step)`` tuple where ``line_step`` is the per-line
+        vertical advance (line height * spacing), used by the caller to place and
+        vertically centre the block.
+    """
+    for size in _QUOTE_FONT_LADDER:
+        font = _font(size)
+        line_step = int(_line_height(font) * _QUOTE_LINE_SPACING)
+        # Cap lines generously here; only the smallest font should ever truncate.
+        lines = _wrap_lines(draw, quote, font, max_width, _QUOTE_MAX_LINES)
+        if len(lines) * line_step <= max_height:
+            return lines, font, line_step
+
+    # Smallest font still overflowed → force a hard cap so it truncates in bounds.
+    font = _font(_QUOTE_FONT_LADDER[-1])
+    line_step = int(_line_height(font) * _QUOTE_LINE_SPACING)
+    max_lines = max(1, max_height // line_step)
+    lines = _wrap_lines(draw, quote, font, max_width, min(max_lines, _QUOTE_MAX_LINES))
+    return lines, font, line_step
+
+
+def render_quote_card(
+    quote: str,
+    *,
+    attribution: str | None = None,
+    settings: Settings | None = None,
+    dimensions: tuple[int, int] = LINKEDIN_SQUARE,
+) -> bytes:
+    """Render a deterministic, on-brand quote card as PNG bytes.
+
+    WHY deterministic (not agy/diffusion): a quote is WORDS, and diffusion models
+    mangle text (BRD §13.6/D10) — so the quote is laid out pixel-precisely by
+    Pillow. Unlike the stat card there is NO grounding requirement: a quote is
+    prose, not numbers, so nothing needs a ``source_item_id``.
+
+    Layout: a navy field, a large decorative gold opening quotation mark with a
+    short gold accent rule beneath it, then the quote auto-fit and centred (word-
+    wrapped, font-size chosen to fill the canvas without overflowing), and an
+    optional discreet attribution line near the bottom. A watermark is applied per
+    ``POST_SIGNATURE_MODE`` (reusing the shared ``_draw_watermark``).
+
+    Args:
+        quote: The quote prose to render. Must be non-blank (fail-closed).
+        attribution: Optional source/author, rendered as ``"— attribution"``.
+        settings: Config source (palette + signature mode); defaults to the
+            process singleton.
+        dimensions: Target canvas — square ``1200x1200`` (default) or the
+            landscape ``1200x627`` link-preview shape.
+
+    Returns:
+        PNG bytes, exactly ``dimensions``.
+
+    Raises:
+        ValueError: If ``quote`` is blank/whitespace-only.
+    """
+    settings = settings or get_settings()
+
+    # Fail closed: a blank quote has nothing to render and must not emit an empty
+    # card silently (§22 — fail-closed, never a misleading empty visual).
+    quote_text = quote.strip()
+    if not quote_text:
+        raise ValueError("render_quote_card requires a non-empty quote")
+
+    palette = _parse_palette(settings.card_brand_palette)
+    navy = palette.get("navy", _FALLBACK_NAVY)
+    gold = palette.get("gold", _FALLBACK_GOLD)
+
+    width, height = dimensions
+    image = Image.new("RGB", (width, height), navy)
+    draw = ImageDraw.Draw(image)
+
+    margin_x = _QUOTE_MARGIN_X
+    max_width = width - 2 * margin_x
+
+    # --- Decorative gold opening quotation mark + accent rule --------------
+    # WHY an accent instead of a datapoint: the quote card's "tasteful gold
+    # accent" is a mark + rule (the stat card uses a full underline). Sizes are
+    # scaled down on the shorter landscape canvas so the mark never dominates.
+    mark_font_size = _QUOTE_MARK_FONT if height >= 900 else int(_QUOTE_MARK_FONT * 0.6)
+    mark_font = _font(mark_font_size)
+    draw.text((margin_x, int(_QUOTE_MARGIN_TOP * 0.25)), "“", font=mark_font, fill=gold)
+    rule_y = _QUOTE_MARGIN_TOP
+    draw.rectangle(
+        [(margin_x, rule_y), (margin_x + _QUOTE_ACCENT_RULE_W, rule_y + _QUOTE_ACCENT_RULE_H)],
+        fill=gold,
+    )
+
+    # --- Auto-fit + centre the quote block ---------------------------------
+    # Vertical budget sits between the accent rule and the attribution footer.
+    block_top_limit = rule_y + _QUOTE_ACCENT_RULE_H + 40
+    block_bottom_limit = height - _QUOTE_MARGIN_BOTTOM
+    available_height = block_bottom_limit - block_top_limit
+    lines, body_font, line_step = _fit_quote_block(draw, quote_text, max_width, available_height)
+
+    block_height = len(lines) * line_step
+    # Centre the block vertically within the available band.
+    start_y = block_top_limit + max(0, (available_height - block_height) // 2)
+    for offset, line in enumerate(lines):
+        line_width = _text_width(draw, line, body_font)
+        line_x = margin_x + max(0, (max_width - line_width) // 2)  # horizontal centre
+        draw.text((line_x, start_y + offset * line_step), line, font=body_font, fill=_WHITE)
+
+    # --- Optional discreet attribution -------------------------------------
+    if attribution and attribution.strip():
+        attrib_font = _font(_QUOTE_ATTRIB_FONT)
+        # Truncate so a long name can never run off the right edge (§13.6).
+        attrib_line = _truncate_line(draw, f"— {attribution.strip()}", attrib_font, max_width)
+        attrib_width = _text_width(draw, attrib_line, attrib_font)
+        attrib_x = margin_x + max(0, (max_width - attrib_width) // 2)
+        draw.text(
+            (attrib_x, height - _QUOTE_ATTRIB_FROM_BOTTOM), attrib_line, font=attrib_font, fill=gold
+        )
+
+    _draw_watermark(image, settings)
+
+    data = _png_bytes(image)
+    _assert_dimensions(data, dimensions)
     return data
 
 

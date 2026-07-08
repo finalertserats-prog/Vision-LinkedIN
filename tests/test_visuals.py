@@ -27,6 +27,7 @@ from vision.visuals.card_renderer import (
     LINKEDIN_LANDSCAPE,
     LINKEDIN_SQUARE,
     render_chart,
+    render_quote_card,
     render_stat_card,
 )
 from vision.visuals.decide import (
@@ -175,6 +176,98 @@ def test_render_stat_card_invalid_palette_color_degrades_to_default() -> None:
     with Image.open(io.BytesIO(data)) as image:
         assert image.format == "PNG"
         assert image.size == LINKEDIN_LANDSCAPE
+
+
+# --- render_quote_card ------------------------------------------------------
+
+
+def test_render_quote_card_returns_png_of_exact_square_dimensions() -> None:
+    # Arrange — a short idea-driven quote (prose, no numbers → no grounding).
+    quote = "Trust in medicine is engineered, not assumed."
+
+    # Act
+    data = render_quote_card(quote, attribution="The Council", settings=_settings())
+
+    # Assert — a valid PNG at the exact square dimension (default variant).
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == LINKEDIN_SQUARE
+
+
+def test_render_quote_card_landscape_variant_returns_exact_dimensions() -> None:
+    # Arrange — the caller may request the landscape link-preview shape.
+    quote = "Clarity is a form of respect."
+
+    # Act
+    data = render_quote_card(
+        quote, settings=_settings(), dimensions=LINKEDIN_LANDSCAPE
+    )
+
+    # Assert
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == LINKEDIN_LANDSCAPE
+
+
+def test_render_quote_card_long_quote_stays_within_canvas() -> None:
+    # Arrange — a pathologically long quote must wrap AND truncate so it never
+    # overflows the canvas; the render must still succeed with a valid PNG.
+    long_quote = (
+        "The value of a diagnostic system is measured not by the confidence of "
+        "its predictions but by the humility with which it surfaces its own "
+        "uncertainty to the clinician who must ultimately decide, because trust "
+        "compounds slowly and erodes instantly across every review pathway, every "
+        "edge case, and every patient whose life bends around a single number on a "
+        "screen that no one paused long enough to question or to understand fully."
+    ) * 3
+
+    # Act
+    data = render_quote_card(long_quote, attribution="A. Very-Long Name", settings=_settings())
+
+    # Assert — still an exact-size PNG (wrapped + truncated within bounds).
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == LINKEDIN_SQUARE
+
+
+def test_render_quote_card_invalid_palette_color_degrades_to_default() -> None:
+    # Arrange — a malformed configured colour must degrade to on-brand defaults,
+    # never crash (same guarantee as the stat card).
+    quote = "Simplicity is the outcome of discipline."
+
+    # Act — invalid navy value; renderer should fall back silently.
+    data = render_quote_card(
+        quote, settings=_settings(CARD_BRAND_PALETTE="navy=notacolor;gold=alsobad")
+    )
+
+    # Assert
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.format == "PNG"
+        assert image.size == LINKEDIN_SQUARE
+
+
+def test_render_quote_card_applies_watermark_when_config_enables_it() -> None:
+    # Arrange — identical quote, watermark OFF vs. CARD_WATERMARK.
+    quote = "Every decision is a small act of trust."
+
+    # Act
+    without = render_quote_card(quote, settings=_settings(POST_SIGNATURE_MODE=SignatureMode.OFF))
+    with_mark = render_quote_card(
+        quote, settings=_settings(POST_SIGNATURE_MODE=SignatureMode.CARD_WATERMARK)
+    )
+
+    # Assert — the watermark changes pixels, so the byte streams differ; both
+    # remain valid exact-size PNGs.
+    assert without != with_mark
+    for data in (without, with_mark):
+        with Image.open(io.BytesIO(data)) as image:
+            assert image.size == LINKEDIN_SQUARE
+
+
+def test_render_quote_card_empty_quote_raises() -> None:
+    # Arrange / Act / Assert — a blank quote has nothing to render; fail closed.
+    with pytest.raises(ValueError, match="quote"):
+        render_quote_card("   ", settings=_settings())
 
 
 # --- render_chart -----------------------------------------------------------

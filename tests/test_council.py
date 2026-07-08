@@ -533,6 +533,75 @@ def test_run_council_returns_draft_shaped_dict(tmp_path: Path) -> None:
     assert draft["model_trace"]["live_voices"] == list(VOICE_ORDER)
 
 
+def test_run_council_defaults_to_no_image(tmp_path: Path) -> None:
+    # Arrange: the council image lane defaults OFF (fail-closed §22.9), so a plain
+    # run must leave the draft text-only regardless of the post's punchiness.
+    def responder(voice: str, prompt: str) -> str:
+        return _GOOD_COMPOSITION if "editor of the BRAHMASTRA" in prompt else f"{voice} take"
+
+    # Act.
+    draft = run_council(voices=FakeVoices(responder), settings=_settings(tmp_path))
+
+    # Assert: image lane disabled ⇒ image_type 'none', no path.
+    assert draft["image_type"] == "none"
+    assert draft["image_path"] is None
+
+
+def test_run_council_attaches_quote_card_when_image_lane_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: enable the council image lane and MOCK the deterministic renderer so
+    # no real Pillow render runs — the composition's first line is a strong
+    # punchline, so the lane must choose a quote card of that exact line.
+    png = b"\x89PNG\r\n\x1a\nfake"
+    rendered: list[str] = []
+
+    def fake_render(quote: str, **_: object) -> bytes:
+        rendered.append(quote)
+        return png
+
+    monkeypatch.setattr("vision.council.visual.render_quote_card", fake_render, raising=False)
+
+    # A composition whose FIRST post line is a clean, number-free, hashtag-free
+    # punchline (hashtags live on their own final line, as a real post would) so
+    # the lane chooses a deterministic quote card of that opener.
+    composition = (
+        "FORMAT: show_the_split\n"
+        "SITUATION: disagreed — one voice prized speed, another safety\n"
+        "POST:\n"
+        "The tools we build quietly rebuild us.\n\n"
+        "We keep pretending there is one right answer.\n\n"
+        "#AI #Leadership #Ethics\n"
+        "COUNCIL:\n"
+        "• Move fast, the upside is huge\n"
+        "• Slow down, the downside is irreversible\n"
+        "• The real risk is pretending it's binary\n"
+        "Powered by Brahmastra"
+    )
+
+    def responder(voice: str, prompt: str) -> str:
+        return composition if "editor of the BRAHMASTRA" in prompt else f"{voice} take"
+
+    settings = _settings(
+        tmp_path,
+        COUNCIL_IMAGE_ENABLED=True,
+        COUNCIL_IMAGE_EVERY_N=1,
+        COUNCIL_IMAGE_DIR=str(tmp_path / "council-images"),
+        COUNCIL_IMAGE_STATE_PATH=str(tmp_path / ".council_image_state.json"),
+    )
+
+    # Act.
+    draft = run_council(voices=FakeVoices(responder), settings=settings)
+
+    # Assert: the punchline drove a deterministic quote card whose PNG was written,
+    # and the draft carries the image_* fields for the mailer/publisher.
+    assert rendered == ["The tools we build quietly rebuild us."]
+    assert draft["image_type"] == "quote_card"
+    assert draft["image_source"] == "deterministic"
+    assert draft["image_prompt"] is None
+    assert Path(draft["image_path"]).read_bytes() == png
+
+
 def test_run_council_uses_explicit_topic_over_queue(tmp_path: Path) -> None:
     # Arrange: an explicit topic must bypass the topic engine entirely.
     def responder(voice: str, prompt: str) -> str:
