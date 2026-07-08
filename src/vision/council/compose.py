@@ -141,6 +141,33 @@ def _demarkdown(line: str) -> str:
     return line.strip().lstrip("#>").strip().strip("*_` ").strip()
 
 
+# The compose model sometimes prefixes the body with a chat preamble ("Here is
+# the post.", "Sure, here you go:") despite the prompt forbidding it. Strip a
+# LEADING preamble line so it never reaches the published post — but only when it
+# clearly reads as meta (mentions 'post', ends with a colon, or is very short),
+# so a genuine opener like "Here is what I learned..." is never eaten.
+_PREAMBLE_RE = re.compile(
+    r"^(here'?s|here is|here you go|sure|okay|ok|certainly|absolutely)\b", re.IGNORECASE
+)
+
+
+def _strip_leading_preamble(post_text: str) -> str:
+    """Drop a leading chat-preamble line ('Here is the post.') from ``post_text``."""
+    lines = post_text.split("\n")
+    while lines:
+        first = lines[0].strip()
+        if not first:
+            lines.pop(0)
+            continue
+        low = first.lower()
+        looks_meta = "post" in low or first.endswith(":") or len(first) <= 24
+        if _PREAMBLE_RE.match(low) and looks_meta:
+            lines.pop(0)
+            continue
+        break
+    return "\n".join(lines).strip()
+
+
 @dataclass
 class ComposedPost:
     """The structured, de-named result of the compose step.
@@ -275,7 +302,7 @@ def _parse_composition(raw: str) -> ComposedPost:
         elif section == "council":
             council_lines.append(line)
 
-    post_text = _strip_em_dashes("\n".join(post_lines).strip())
+    post_text = _strip_em_dashes(_strip_leading_preamble("\n".join(post_lines).strip()))
     council_block = _strip_em_dashes("\n".join(council_lines).strip())
     hashtags = _HASHTAG_RE.findall(post_text)
     return ComposedPost(

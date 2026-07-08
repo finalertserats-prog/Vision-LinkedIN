@@ -73,6 +73,33 @@ def test_parse_composition_salvages_markdown_output():
     assert "#Leadership" in parsed.hashtags[0] or "Leadership" in "".join(parsed.hashtags)
 
 
+def test_parse_composition_strips_leading_preamble():
+    # Regression: the model prefixed the body with "Here is the post." (2026-07-08).
+    raw = (
+        "FORMAT: quiet_observation\nSITUATION: agreed\n"
+        "POST:\nHere is the post.\n\n"
+        "We hand out medals for catching liars. We give nothing for admitting we "
+        "were fooled, which is the far harder and more useful thing, and that gap "
+        "is exactly where teams quietly rot from the inside out over time. #Teams\n"
+    )
+    parsed = _parse_composition(raw)
+    assert not parsed.post_text.lower().startswith("here is the post")
+    assert parsed.post_text.startswith("We hand out medals")
+
+
+def test_parse_composition_keeps_genuine_here_is_opener():
+    # False-positive guard: a real opener that merely starts with "Here is" and is
+    # NOT meta (no 'post', no colon, long) must survive untouched.
+    opener = (
+        "Here is what nine years of running a clinic actually taught me about "
+        "trust, and it is not what the management books promised at all when I "
+        "started out believing every one of their tidy little frameworks. #Trust"
+    )
+    raw = f"FORMAT: quiet_observation\nSITUATION: agreed\nPOST:\n{opener}\n"
+    parsed = _parse_composition(raw)
+    assert parsed.post_text.startswith("Here is what nine years")
+
+
 def test_strip_em_dashes_replaces_em_and_en_dashes_with_hyphen():
     # Owner rule: em-dashes read as an AI tell; posts must ship hyphens instead.
     spaced = "The theft isn't in being predicted — it's in the ceasing to notice."
