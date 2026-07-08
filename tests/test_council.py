@@ -133,6 +133,31 @@ def test_parse_composition_strips_leading_preamble():
     assert parsed.post_text.startswith("We hand out medals")
 
 
+def test_parse_composition_strips_trailing_chat_outro():
+    # Regression (2026-07-08): the model appended "Want me to tighten it further?"
+    # to the post body. A trailing assistant-offer must never publish.
+    body = "A real grounded post about building the counterweight on purpose. " * 6
+    raw = (
+        "FORMAT: problem_solved\nSITUATION: lesson\nPOST:\n"
+        + body
+        + "\n\nWant me to tighten it further, add a hook, or produce a shorter variant?\n"
+    )
+    parsed = _parse_composition(raw)
+    assert "want me to" not in parsed.post_text.lower()
+    assert parsed.post_text.rstrip().endswith("on purpose.")
+
+
+def test_parse_composition_keeps_genuine_reader_cta():
+    # False-positive guard: a genuine reader CTA is NOT an assistant offer.
+    raw = (
+        "FORMAT: quiet_observation\nSITUATION: agreed\nPOST:\n"
+        + ("A solid reflective post that earns its ending over many words. " * 6)
+        + "\n\nWhat do you think?\n"
+    )
+    parsed = _parse_composition(raw)
+    assert parsed.post_text.rstrip().endswith("What do you think?")
+
+
 def test_parse_composition_keeps_genuine_here_is_opener():
     # False-positive guard: a real opener that merely starts with "Here is" and is
     # NOT meta (no 'post', no colon, long) must survive untouched.

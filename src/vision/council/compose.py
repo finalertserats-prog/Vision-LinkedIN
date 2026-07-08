@@ -168,6 +168,34 @@ def _strip_leading_preamble(post_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+# The compose model sometimes appends a chat OUTRO offering to edit the post
+# ("Want me to tighten it further?", "Shall I make it shorter?"). Strip a trailing
+# assistant-offer line so it never publishes. Kept CONSERVATIVE (explicit offer
+# phrasings only) so a genuine reader CTA like "What do you think?" survives.
+_OUTRO_RE = re.compile(
+    r"^(want me to|shall i|should i|would you like me to|i can (also )?"
+    r"(tighten|shorten|rewrite|adjust|make|produce|draft)|"
+    r"happy to (tighten|adjust|rewrite|shorten|help)|hope this helps|"
+    r"let me know if you.?d like me to)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_trailing_outro(post_text: str) -> str:
+    """Drop a trailing assistant-offer line ('Want me to tighten it?') from the post."""
+    lines = post_text.split("\n")
+    while lines:
+        last = lines[-1].strip()
+        if not last:
+            lines.pop()
+            continue
+        if _OUTRO_RE.match(last.lower()):
+            lines.pop()
+            continue
+        break
+    return "\n".join(lines).strip()
+
+
 @dataclass(frozen=True)
 class ContrastSpec:
     """A two-sided contrast for a contrast-card image (optional, §13.6 + owner req).
@@ -351,7 +379,9 @@ def _parse_composition(raw: str) -> ComposedPost:
         elif section == "council":
             council_lines.append(line)
 
-    post_text = _strip_em_dashes(_strip_leading_preamble("\n".join(post_lines).strip()))
+    post_text = _strip_em_dashes(
+        _strip_trailing_outro(_strip_leading_preamble("\n".join(post_lines).strip()))
+    )
     council_block = _strip_em_dashes("\n".join(council_lines).strip())
     hashtags = _HASHTAG_RE.findall(post_text)
     return ComposedPost(
