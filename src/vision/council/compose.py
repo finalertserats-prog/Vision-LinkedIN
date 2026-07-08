@@ -120,6 +120,27 @@ def _strip_em_dashes(text: str) -> str:
     return text.translate(_EM_DASHES)
 
 
+# The compose model non-deterministically prettifies output with Markdown (bold
+# headers like '**Format:**', a '---' rule, backtick-wrapped values) instead of
+# the plain FORMAT:/POST:/COUNCIL: markers the prompt asks for. The parser below
+# normalizes this so a well-written post is never dropped for arriving dressed in
+# Markdown (see _parse_composition).
+_HR_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")  # a Markdown horizontal rule
+_SIGNATURE_LINE = "powered by brahmastra"
+_FORMAT_KEYS = frozenset({"format", "format chosen"})
+_SITUATION_KEYS = frozenset({"situation", "honesty gate"})
+
+# The compose prompt asks for a 700-1600 char post. A parsed body shorter than
+# this floor is not a real post but a sentinel/preamble/refusal — treated as a
+# parse miss so the Markdown-salvage path can never publish a short non-post.
+_MIN_POST_CHARS = 200
+
+
+def _demarkdown(line: str) -> str:
+    """Strip Markdown header dressing (**bold**, ##, >, `code`) from ``line``."""
+    return line.strip().lstrip("#>").strip().strip("*_` ").strip()
+
+
 @dataclass
 class ComposedPost:
     """The structured, de-named result of the compose step.
@@ -201,30 +222,54 @@ def _parse_composition(raw: str) -> ComposedPost:
     section: str | None = None  # which multi-line section we're accumulating
 
     for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("FORMAT:"):
-            fmt = stripped.split(":", 1)[1].strip()
-            section = None
+        # Detect headers on a Markdown-normalized copy, but accumulate the ORIGINAL
+        # line so the post's own formatting/indentation survives.
+        norm = _demarkdown(line)
+        low = norm.lower()
+
+        if _HR_RE.match(line):
+            # A horizontal rule usually divides metadata from the body when the
+            # model drops an explicit 'POST:' marker — enter the post there.
+            if section is None:
+                section = "post"
             continue
-        if stripped.startswith("SITUATION:"):
-            situation = stripped.split(":", 1)[1].strip()
-            section = None
+
+        # Colon headers (plain or Markdown-dressed): FORMAT/SITUATION/POST/COUNCIL
+        # plus the model's habitual aliases 'Format chosen'/'Honesty gate'.
+        if ":" in norm:
+            key = low.split(":", 1)[0].strip()
+            value = _demarkdown(norm.split(":", 1)[1])
+            if key in _FORMAT_KEYS:
+                if value:
+                    fmt = value
+                section = None
+                continue
+            if key in _SITUATION_KEYS:
+                situation = value
+                section = None
+                continue
+            if key == "post":
+                section = "post"
+                if value:
+                    post_lines.append(value)
+                continue
+            if key == "council":
+                section = "council"
+                if value:
+                    council_lines.append(value)
+                continue
+        # Bare heading lines with no colon (e.g. a Markdown '## POST').
+        elif low in {"post", "council"}:
+            section = "post" if low == "post" else "council"
             continue
-        if stripped.startswith("POST:"):
-            # A 'POST:' header may carry inline text after the colon; keep it.
+
+        if low == _SIGNATURE_LINE:
+            continue
+
+        # Untagged prose: Format-B output has no 'POST:' marker, so the first real
+        # body line starts the post (header lines above already 'continue'd).
+        if section is None and norm:
             section = "post"
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                post_lines.append(inline)
-            continue
-        if stripped.startswith("COUNCIL:"):
-            section = "council"
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                council_lines.append(inline)
-            continue
-        # Accumulate body lines into the active section (preserve original line,
-        # not the stripped one, so post formatting/indentation survives).
         if section == "post":
             post_lines.append(line)
         elif section == "council":
@@ -313,14 +358,17 @@ class Composer:
             "4. Write a 'Council' block: exactly 3 short bullet lines capturing the distinct "
             "viewpoints — NO names, just the positions. Then a final standalone line: "
             "'Powered by Brahmastra'.\n\n"
-            "OUTPUT EXACTLY in this shape. You MUST include the literal headers "
-            "FORMAT:, SITUATION:, POST:, and COUNCIL: each on their own line — ALWAYS, "
-            "for EVERY format including quiet_observation (the post body goes under the "
-            "POST: header even when it reads as a plain reflection):\n"
+            "OUTPUT FORMAT (strict): PLAIN TEXT only. Do NOT use Markdown - no **bold**, "
+            "no ## headings, no '---' rules, no backticks. Do NOT write any preamble, "
+            "reasoning, or explanation. Your reply MUST begin with the literal characters "
+            "'FORMAT:' and include the literal headers FORMAT:, SITUATION:, POST:, and "
+            "COUNCIL: each on its own line - ALWAYS, for EVERY format including "
+            "quiet_observation (the post body goes under the POST: header even when it "
+            "reads as a plain reflection):\n"
             "FORMAT: <chosen_format_name>\n"
-            "SITUATION: <disagreed|agreed|shifted> — <one line why>\n"
+            "SITUATION: <disagreed|agreed|shifted> - <one line why>\n"
             "POST:\n<the post>\n"
-            "COUNCIL:\n• <viewpoint 1>\n• <viewpoint 2>\n• <viewpoint 3>\n"
+            "COUNCIL:\n- <viewpoint 1>\n- <viewpoint 2>\n- <viewpoint 3>\n"
             "Powered by Brahmastra"
         )
 
@@ -369,15 +417,28 @@ class Composer:
                 )
                 raise ForbiddenNameError(leak)
 
-            # Parse-miss guard — an empty POST body means the editor didn't emit the
-            # POST section; retry rather than return an empty draft (silent failure).
+            # Parse-miss guard — a missing/tiny POST body means the editor didn't emit
+            # a usable post; retry rather than return an empty draft (silent failure).
+            # The prompt asks for a 700-1600 char post, so a body under _MIN_POST_CHARS
+            # is not a real post but a sentinel/preamble/refusal — this also stops the
+            # Markdown-salvage path from ever grabbing a short non-post as the body.
             # The COUNCIL block is now OPTIONAL: the public post no longer includes it
             # (owner removed it), so a dropped Council section is NOT a failure — we
             # just proceed without it (the email loses that context, but the post is
-            # fine). Only an empty POST body is a real parse miss worth retrying.
-            if not composed.post_text.strip():
-                last_error = "parse miss: empty post body"
-                logger.warning("Council compose parse miss; retrying.", extra={"attempt": attempt})
+            # fine). Only a missing/too-short POST body is a real parse miss.
+            if len(composed.post_text.strip()) < _MIN_POST_CHARS:
+                last_error = "parse miss: empty or too-short post body"
+                # Log a bounded preview of what the editor actually returned so a
+                # parse miss is diagnosable instead of silent (the editor usually
+                # dropped the 'POST:' marker or answered conversationally).
+                logger.warning(
+                    "Council compose parse miss; retrying.",
+                    extra={
+                        "attempt": attempt,
+                        "raw_len": len(raw),
+                        "raw_preview": raw.strip()[:400],
+                    },
+                )
                 continue
             if not composed.council_block.strip():
                 logger.info("Council block empty (optional) — proceeding without it.")

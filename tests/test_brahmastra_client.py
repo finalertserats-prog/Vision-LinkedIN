@@ -394,7 +394,6 @@ def _output_path_from_cmd(cmd: list[str]) -> Path:
     prompt = cmd[cmd.index("-p") + 1]
     marker = "Save the generated PNG to "
     start = prompt.index(marker) + len(marker)
-    end = prompt.index(".", start) if ". Confirm" in prompt[start:] else len(prompt)
     # The path ends right before the '. Confirm the file path' sentence.
     tail = prompt[start:]
     path_str = tail.split(". Confirm", 1)[0].strip()

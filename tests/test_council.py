@@ -26,6 +26,7 @@ from vision.config import Settings
 from vision.council.compose import (
     Composer,
     ForbiddenNameError,
+    _parse_composition,
     _strip_em_dashes,
     contains_forbidden_name,
     find_forbidden_name,
@@ -35,6 +36,41 @@ from vision.council.engine import run_council
 from vision.council.formats import FORMATS, RecentFormatStore
 from vision.council.topics import TopicEngine
 from vision.council.voices import CLAUDE, CODEX, GEMINI, VOICE_ORDER, Voices
+
+
+def test_parse_composition_plain_markers():
+    raw = (
+        "FORMAT: rare_consensus\n"
+        "SITUATION: agreed - three doors, one room\n"
+        "POST:\nGrief was never supposed to renew.\nBuild accordingly.\n"
+        "COUNCIL:\n- outsourced mourning\n- rented headstone\n- the cancel button\n"
+        "Powered by Brahmastra"
+    )
+    parsed = _parse_composition(raw)
+    assert parsed.format == "rare_consensus"
+    assert parsed.post_text.startswith("Grief was never supposed to renew.")
+    assert "Powered by Brahmastra" not in parsed.post_text
+    assert len(parsed.council_block.splitlines()) == 3
+
+
+def test_parse_composition_salvages_markdown_output():
+    # Regression: the compose model sometimes returns Markdown (bold headers, a
+    # '---' rule) with NO literal 'POST:' marker. The body must still be recovered
+    # rather than yielding an empty post (the 2026-07-08 council failure).
+    raw = (
+        "**Honesty gate:** Genuine disagreement about mechanism.\n"
+        "**Format:** `show_the_split`\n"
+        "---\n"
+        "Every org chart is a map of who is permitted to be wrong out loud.\n\n"
+        "That says more than any strategy deck.\n\n"
+        "#Leadership #Culture #Work"
+    )
+    parsed = _parse_composition(raw)
+    assert parsed.format == "show_the_split"
+    assert parsed.post_text.startswith("Every org chart is a map")
+    assert "strategy deck" in parsed.post_text
+    assert "Honesty gate" not in parsed.post_text
+    assert "#Leadership" in parsed.hashtags[0] or "Leadership" in "".join(parsed.hashtags)
 
 
 def test_strip_em_dashes_replaces_em_and_en_dashes_with_hyphen():
@@ -94,7 +130,13 @@ _GOOD_COMPOSITION = (
     "FORMAT: show_the_split\n"
     "SITUATION: disagreed — one voice prized speed, another safety\n"
     "POST:\n"
-    "We keep pretending there is one right answer. There isn't. #AI #Leadership #Ethics\n"
+    "We keep pretending there is one right answer. There isn't, and the sooner a "
+    "team says that out loud the faster it stops performing a certainty it never "
+    "earned. Speed and safety are not a scoreboard where one wins; they are a "
+    "tension you hold on purpose. The useful move is not to pick the brave side or "
+    "the careful side. It is to name the tradeoff plainly, in daylight, and let "
+    "people choose with their eyes open instead of pretending the choice was never "
+    "there. That is the whole job. #AI #Leadership #Ethics\n"
     "COUNCIL:\n"
     "• Move fast, the upside is huge\n"
     "• Slow down, the downside is irreversible\n"
@@ -292,7 +334,7 @@ def test_compose_fails_closed_on_forbidden_name_leak(tmp_path: Path) -> None:
     # Arrange: the composing voice slips a real model name into the POST body
     # despite the HARD RULES — de-naming must fail CLOSED, never ship the leak.
     leaking = _GOOD_COMPOSITION.replace(
-        "We keep pretending there is one right answer. There isn't.",
+        "We keep pretending there is one right answer.",
         "As Gemini argued, we keep pretending there is one right answer.",
     )
     composer = Composer(
@@ -582,7 +624,12 @@ def test_run_council_attaches_quote_card_when_image_lane_enabled(
         "SITUATION: disagreed — one voice prized speed, another safety\n"
         "POST:\n"
         "The tools we build quietly rebuild us.\n\n"
-        "We keep pretending there is one right answer.\n\n"
+        "We keep pretending there is one right answer, and the pretending is the "
+        "expensive part. A tool is never only a tool; it quietly sets the defaults "
+        "for where our attention goes, and defaults harden into habits long before "
+        "anyone stops to vote on them. The work is to notice the reshaping while you "
+        "can still choose it, instead of waking up fluent in a language you never "
+        "meant to learn.\n\n"
         "#AI #Leadership #Ethics\n"
         "COUNCIL:\n"
         "• Move fast, the upside is huge\n"
