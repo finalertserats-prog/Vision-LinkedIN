@@ -148,7 +148,10 @@ def _settings(tmp_path: Path, **overrides: object) -> Settings:
         "COUNCIL_RECENT_WINDOW": 4,
     }
     base.update(overrides)
-    return Settings(**base)  # type: ignore[arg-type]
+    # _env_file=None keeps these Settings truly hermetic: ignore the developer's
+    # real .env (now anchored to an absolute path) so tests depend only on code
+    # defaults + explicit overrides, never on live config like COUNCIL_IMAGE_ENABLED.
+    return Settings(_env_file=None, **base)  # type: ignore[arg-type]
 
 
 # A well-formed composer output used across compose/engine tests. It obeys the

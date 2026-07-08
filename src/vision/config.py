@@ -16,6 +16,12 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Anchor the .env to the project root (this file is <root>/src/vision/config.py)
+# so ANY process finds it regardless of its working directory. Scheduled tasks and
+# services do not reliably start in the repo root; a cwd-relative ".env" silently
+# fell back to unsafe defaults (dry_run/staging + no credentials) for them.
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
 
 # --- Enums make invalid modes impossible to represent ----------------------
 # Using enums (rather than free strings) means an out-of-range value fails
@@ -66,7 +72,7 @@ class Settings(BaseSettings):
     # richer deployment ``.env`` never crashes the app, and treat env var names
     # case-insensitively to match shell conventions.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
