@@ -65,6 +65,9 @@ _CAPTION_FONT_FRACTION = 0.045  # font size as a fraction of canvas height
 _CAPTION_Y_FRACTION = 0.78  # caption baseline as a fraction of canvas height
 _CAPTION_BOX_ALPHA = 0.55  # semi-opaque backing box for legibility over any still
 _CAPTION_BORDER_W = 2  # black outline so text stays crisp on light frames
+# A gentle open-from-black / close-to-black on the whole reel for a finished feel.
+# A clean, low-risk polish that reads far more "produced" than a hard cut in/out.
+_VIDEO_FADE_SECONDS = 0.5
 
 
 class AssemblyError(Exception):
@@ -242,7 +245,16 @@ def _build_filter_complex(
         for i, clip in enumerate(clips)
     ]
     concat_inputs = "".join(f"[v{i}]" for i in range(len(clips)))
-    concat = f"{concat_inputs}concat=n={len(clips)}:v=1:a=0[vout]"
+    concat = f"{concat_inputs}concat=n={len(clips)}:v=1:a=0[vcat]"
+    # Gentle fade from black at the open and to black at the close of the whole reel
+    # (clamped so a very short reel still fades). This runs on the concatenated
+    # stream so the timing is the reel's real total duration.
+    total = sum(c.duration_seconds for c in clips)
+    fade = min(_VIDEO_FADE_SECONDS, total / 4)
+    vfade = (
+        f"[vcat]fade=t=in:st=0:d={fade:.3f},"
+        f"fade=t=out:st={max(0.0, total - fade):.3f}:d={fade:.3f}[vout]"
+    )
 
     if len(audio_input_indexes) == 2:
         vo_index, music_index = audio_input_indexes
@@ -259,7 +271,7 @@ def _build_filter_complex(
         (vo_index,) = audio_input_indexes
         audio = f"[{vo_index}:a]anull[aout]"
 
-    return ";".join([*scene_graphs, concat, audio])
+    return ";".join([*scene_graphs, concat, vfade, audio])
 
 
 def _build_command(

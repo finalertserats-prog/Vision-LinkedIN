@@ -236,3 +236,32 @@ These are the difference between "world-class" and "AI slop." They are enforced 
 - **Voice:** owner voice clone (consent) vs. a chosen stock voice for the audio brand.
 - **Cadence:** weekly flagship default vs. per-post "promote to reel" opt-in (both are config).
 - **Music:** which licensed library / intro sting for audio-brand continuity.
+
+---
+
+## 8. Reality check + the three video paths (2026-07-08)
+
+An end-to-end run and a Veo feasibility test settled the "real video" question:
+
+- **Veo / true generative video — NOT available no-key.** `agy` (Antigravity)
+  replied `VIDEO_NOT_AVAILABLE` ("not equipped with video generation tools or APIs
+  like Veo in this environment"). Real motion video needs a **paid API key**, which
+  the owner's no-key rule rules out. Do not build on Veo until that changes.
+- **Motion-graphics reel (`src/vision/video/`) — the automated path.** Anime stills
+  (agy) + edge-tts VO + ffmpeg Ken Burns + burned captions + open/close fade. Proven
+  end-to-end (a real 16s reel). Fully automated, no key. This is "slideshow with
+  motion + narration", not true video — honest naming.
+  - **VO timing fix:** edge-tts omits `WordBoundary` for some voices, so duration
+    came back 0; `voiceover.py` now probes the real mp3 duration via the bundled
+    ffmpeg. Scenes now sync to the narration.
+- **NotebookLM — the semi-manual flagship path.** No public API (only the Google
+  Drive MCP is reachable), so it can't be automated. But `video/notebooklm_pack.py`
+  produces a tight, on-message SOURCE PACK (+ a steering prompt) so NotebookLM's
+  Video Overview stays <60s and presentable. Flow: VISION writes the pack to a
+  Drive-synced folder -> owner generates + downloads the overview in NotebookLM ->
+  VISION uploads + posts it (reuses `video/upload.py`).
+
+**Recommendation:** motion-graphics for the automated daily/weekly reel; NotebookLM
+for occasional polished flagship pieces; revisit Veo only if a keyless/subscription
+path appears. Crossfade transitions between scenes are a further motion-graphics
+polish (deferred — the xfade/audio-sync work needs care).
