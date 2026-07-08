@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import subprocess
 import tempfile
 from pathlib import Path
 
 import edge_tts
+import imageio_ffmpeg
 
 from vision.video.schema import ReelScript, Scene, VoiceoverResult
 
@@ -33,6 +36,12 @@ logger = logging.getLogger(__name__)
 # edge-tts reports WordBoundary offsets/durations in 100-nanosecond ticks; divide
 # by 1e7 to get seconds. Named so the conversion never reads as a magic number.
 _TICKS_PER_SECOND = 1e7
+
+# ffmpeg prints "Duration: HH:MM:SS.ss" on stderr. WHY we need this: edge-tts does
+# NOT emit WordBoundary events for every voice (confirmed empty on a real run), so
+# the tick-based measure silently returned 0. We fall back to probing the actual
+# mp3 duration with the ffmpeg binary we already bundle (imageio-ffmpeg).
+_DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 
 
 class VoiceoverError(Exception):
@@ -139,7 +148,7 @@ def _synthesize_scene(
         return b"", 0.0
 
     try:
-        return asyncio.run(_stream_scene(text, voice))
+        audio, seconds = asyncio.run(_stream_scene(text, voice))
     except VoiceoverError:
         # Already the typed contract error — surface as-is (don't double-wrap).
         raise
@@ -151,6 +160,50 @@ def _synthesize_scene(
         raise VoiceoverError(
             f"edge-tts synthesis failed for scene {index}: {exc}"
         ) from exc
+
+    # WordBoundary can be absent for a voice (real-run finding); when the tick
+    # measure is unusable, probe the actual audio so scene timing is never zero.
+    if seconds <= 0.0:
+        seconds = _probe_duration_seconds(audio)
+    return audio, seconds
+
+
+def _probe_duration_seconds(mp3_bytes: bytes) -> float:
+    """Measure an mp3's real duration (seconds) via the bundled ffmpeg, or 0.0.
+
+    The reliable fallback when edge-tts emits no WordBoundary events. Writes the
+    bytes to a temp file and parses ``Duration:`` from ``ffmpeg -i`` stderr (the
+    imageio-ffmpeg binary ships no ffprobe). Best-effort: any failure returns 0.0
+    so timing degrades rather than crashing the reel.
+    """
+    if not mp3_bytes:
+        return 0.0
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp.write(mp3_bytes)
+            tmp_path = tmp.name
+        proc = subprocess.run(  # noqa: S603 — args are the bundled binary + our temp path
+            [imageio_ffmpeg.get_ffmpeg_exe(), "-i", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        match = _DURATION_RE.search(proc.stderr)
+        if not match:
+            return 0.0
+        hours, minutes, seconds = match.groups()
+        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        logger.warning("mp3 duration probe failed (%s); scene timing may be off.", type(exc).__name__)
+        return 0.0
+    finally:
+        if tmp_path is not None:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
 
 
 async def _stream_scene(text: str, voice: str) -> tuple[bytes, float]:

@@ -111,3 +111,28 @@ def test_synthesize_raises_voiceover_error_on_edge_tts_failure(
     # Act / Assert
     with pytest.raises(VoiceoverError):
         synthesize_voiceover(script, out_dir=tmp_path)
+
+
+def test_probe_duration_on_a_real_mp3_returns_positive(tmp_path: Path) -> None:
+    # Regression (2026-07-08): edge-tts emitted no WordBoundary events on a real
+    # run, so duration came back 0. The ffmpeg fallback must measure a real mp3.
+    import subprocess
+
+    import imageio_ffmpeg
+
+    from vision.video.voiceover import _probe_duration_seconds
+
+    mp3 = tmp_path / "half_second.mp3"
+    subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+         "-t", "0.5", str(mp3)],
+        capture_output=True, check=True,
+    )
+    seconds = _probe_duration_seconds(mp3.read_bytes())
+    assert 0.3 < seconds < 1.0  # ~0.5s, measured from the real file
+
+
+def test_probe_duration_on_empty_bytes_is_zero() -> None:
+    from vision.video.voiceover import _probe_duration_seconds
+
+    assert _probe_duration_seconds(b"") == 0.0
