@@ -76,17 +76,18 @@ class BrahmastraImageClient:
         self,
         settings: Settings | None = None,
         *,
-        timeout: float = 200.0,
+        timeout: float = 300.0,
     ) -> None:
         """Wire the image client to config.
 
         Args:
             settings: Config source (agy binary path + style guide). Defaults to
                 the process-wide singleton.
-            timeout: Per-attempt bound (seconds) on a hung agy run. WHY ~200s:
-                agy generates as an agent (slower than a raw API), so it needs a
-                generous ceiling while still guaranteeing the run cannot hang
-                forever. Configurable for non-standard hosts (config over code, §22.6).
+            timeout: Per-attempt bound (seconds) on a hung agy run. WHY ~300s:
+                agy generates as an agent (~70s typical) but slows under system load
+                (e.g. concurrent council processes) — a 200s ceiling was seen to
+                time out and drop the anime image (2026-07-08). 300s gives headroom
+                while still guaranteeing the run cannot hang forever. Config-overridable.
         """
         self._settings = settings or get_settings()
         self._timeout = timeout
