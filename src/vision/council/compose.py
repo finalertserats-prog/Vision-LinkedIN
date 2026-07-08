@@ -502,6 +502,25 @@ class Composer:
                 )
                 raise ForbiddenNameError(leak)
 
+            # The contrast labels/scenes get RENDERED INTO the published image, so
+            # they need the same de-naming guard (Codex review — publish-safety). A
+            # leak here DROPS the optional card (keep the good post, lose the risky
+            # image) rather than failing the whole compose.
+            if composed.contrast is not None:
+                c = composed.contrast
+                card_leak = (
+                    find_forbidden_name(c.left_label)
+                    or find_forbidden_name(c.left_scene)
+                    or find_forbidden_name(c.right_label)
+                    or find_forbidden_name(c.right_scene)
+                )
+                if card_leak is not None:
+                    logger.warning(
+                        "Contrast card names a forbidden AI/model; dropping the card.",
+                        extra={"forbidden_match": card_leak},
+                    )
+                    composed.contrast = None
+
             # Parse-miss guard — a missing/tiny POST body means the editor didn't emit
             # a usable post; retry rather than return an empty draft (silent failure).
             # The prompt asks for a 700-1600 char post, so a body under _MIN_POST_CHARS

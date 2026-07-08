@@ -82,7 +82,7 @@ def run_council(
               "council_block": str,
               "transcript": {voice: {"round1", "round2"}},  # raw, never published
               "model_trace": {...},                          # per-stage provenance
-              "image_type": str,        # 'none'|'quote_card'|'concept_illustration'
+              "image_type": str,        # 'none'|'quote_card'|'concept_illustration'|'contrast_card'
               "image_path": str | None, # written PNG (None when text-only)
               "image_source": str | None,  # 'deterministic' | '<model-id>'
               "image_prompt": str | None,  # concept prompt (None for a card)

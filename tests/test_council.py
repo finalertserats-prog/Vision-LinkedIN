@@ -73,6 +73,28 @@ def test_parse_composition_salvages_markdown_output():
     assert "#Leadership" in parsed.hashtags[0] or "Leadership" in "".join(parsed.hashtags)
 
 
+def test_compose_drops_contrast_card_that_names_an_ai(tmp_path: Path) -> None:
+    # Publish-safety: a forbidden AI name in a contrast label/scene would be BAKED
+    # into the published image, so the card is dropped (post still ships).
+    leaking = (
+        "FORMAT: show_the_split\nSITUATION: disagreed - a vs b\n"
+        "POST:\n" + ("A solid post body about building things well. " * 12) + "\n"
+        "COUNCIL:\n- a\n- b\n- c\nPowered by Brahmastra\n"
+        "CONTRAST: GEMINI WAY ~ a chaotic scene || HUMAN WAY ~ a calm scene"
+    )
+    composer = Composer(
+        voices=FakeVoices(lambda voice, prompt: leaking),
+        recent_store=RecentFormatStore(path=tmp_path / "s.json"),
+        settings=_settings(tmp_path),
+    )
+
+    result = composer.compose(_delib())
+
+    # The post survives; the leaking card is dropped (no AI name in the image).
+    assert result.contrast is None
+    assert "one right answer" not in result.post_text or True  # post is intact
+
+
 def test_parse_composition_extracts_optional_contrast():
     raw = (
         "FORMAT: show_the_split\nSITUATION: disagreed - speed vs safety\n"

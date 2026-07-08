@@ -621,12 +621,13 @@ def _stamp_draft(
     draft["image_type"] = choice.image_type
     draft["image_path"] = str(out_path)
     if choice.image_type == IMAGE_TYPE_QUOTE_CARD:
-        # A quote card is deterministic (label composited over solid brand colour);
-        # a contrast card mixes agy panels with deterministic labels, but its TEXT
-        # is deterministic too, so both record as deterministic provenance.
+        # A quote card is fully deterministic (text over a solid brand colour), so it
+        # has no generative prompt to record.
         draft["image_source"] = _SOURCE_DETERMINISTIC
         draft["image_prompt"] = None
     elif choice.image_type == IMAGE_TYPE_CONTRAST and choice.contrast is not None:
+        # A contrast card's PANELS are agy-generated (its labels are deterministic),
+        # so provenance records the agy model + the two text-free scene prompts.
         draft["image_source"] = settings.image_model
         draft["image_prompt"] = (
             f"LEFT: {choice.contrast.left_scene} | RIGHT: {choice.contrast.right_scene}"
