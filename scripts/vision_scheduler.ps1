@@ -46,28 +46,31 @@ $Venv = Join-Path $Root '.venv\Scripts'
 $User = "$env:USERDOMAIN\$env:USERNAME"
 
 function Assert-Paths {
-  foreach ($exe in 'vision-council.exe', 'vision-publisher.exe', 'vision-expire.exe', 'vision-retention.exe', 'uvicorn.exe') {
-    $p = Join-Path $Venv $exe
-    if (-not (Test-Path $p)) { throw "Missing venv executable: $p (is the venv built?)" }
-  }
+  # Tasks now launch via pythonw.exe -m <module> (windowless), so the venv only
+  # needs pythonw + the installed package (checked by importing one module).
+  $pythonw = Join-Path $Venv 'pythonw.exe'
+  if (-not (Test-Path $pythonw)) { throw "Missing $pythonw (is the venv built?)" }
+  $python = Join-Path $Venv 'python.exe'
+  & $python -c "import vision.cli.council, vision.publish.worker, uvicorn" 2>$null
+  if ($LASTEXITCODE -ne 0) { throw "Package not importable in the venv - run: .venv\Scripts\pip install -e ." }
 }
 
 function New-VisionTask {
   param(
     [string]$Name,
-    [string]$Exe,
-    [string]$Arguments = '',
+    [string]$Module,          # python module run with `-m` (e.g. vision.cli.council)
+    [string]$Arguments = '',  # extra args appended after the module
     [Microsoft.Management.Infrastructure.CimInstance]$Trigger,
     [switch]$LongRunning
   )
   $full = "$Prefix$Name"
-  $exePath = Join-Path $Venv $Exe
-  # New-ScheduledTaskAction rejects an empty -Argument, so only pass it when set.
-  if ([string]::IsNullOrWhiteSpace($Arguments)) {
-    $action = New-ScheduledTaskAction -Execute $exePath -WorkingDirectory $Root
-  } else {
-    $action = New-ScheduledTaskAction -Execute $exePath -Argument $Arguments -WorkingDirectory $Root
-  }
+  # pythonw.exe is the GUI-subsystem Python: it launches with NO console window, so a
+  # scheduled run never flashes a terminal (the whole point of this change). We run
+  # the module with -m so it resolves against the freshly-installed package.
+  $pythonw = Join-Path $Venv 'pythonw.exe'
+  $argLine = "-m $Module"
+  if (-not [string]::IsNullOrWhiteSpace($Arguments)) { $argLine = "$argLine $Arguments" }
+  $action = New-ScheduledTaskAction -Execute $pythonw -Argument $argLine -WorkingDirectory $Root
   $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
 
   # A long-running server (web) must never be killed by an execution-time limit;
@@ -77,9 +80,10 @@ function New-VisionTask {
   } else {
     $limit = New-TimeSpan -Hours 1
   }
+  # -Hidden marks the task hidden (belt-and-suspenders with pythonw's no-window).
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 2) `
-    -ExecutionTimeLimit $limit -MultipleInstances IgnoreNew
+    -ExecutionTimeLimit $limit -MultipleInstances IgnoreNew -Hidden
 
   # Idempotent: replace any existing task of the same name.
   Unregister-ScheduledTask -TaskName $full -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
@@ -93,7 +97,7 @@ function Install-Tasks {
   Write-Host "Installing VISION scheduled tasks (user: $User, root: $Root)" -ForegroundColor Cyan
 
   # Council: once daily at the chosen time.
-  New-VisionTask -Name 'Council' -Exe 'vision-council.exe' `
+  New-VisionTask -Name 'Council' -Module 'vision.cli.council' `
     -Trigger (New-ScheduledTaskTrigger -Daily -At $CouncilAt)
 
   # Publisher: repeat every N minutes, indefinitely (the .Repetition graft is the
@@ -102,19 +106,19 @@ function Install-Tasks {
   $pub.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
       -RepetitionInterval (New-TimeSpan -Minutes $PollMinutes) `
       -RepetitionDuration (New-TimeSpan -Days 3650)).Repetition
-  New-VisionTask -Name 'Publisher' -Exe 'vision-publisher.exe' -Trigger $pub
+  New-VisionTask -Name 'Publisher' -Module 'vision.publish.worker' -Trigger $pub
 
   # Expire: once daily at the cutoff.
-  New-VisionTask -Name 'Expire' -Exe 'vision-expire.exe' `
+  New-VisionTask -Name 'Expire' -Module 'vision.cli.expire' `
     -Trigger (New-ScheduledTaskTrigger -Daily -At $ExpireAt)
 
   # Retention: weekly archive -> Drive backup -> prune (off-hours, low traffic).
-  New-VisionTask -Name 'Retention' -Exe 'vision-retention.exe' `
+  New-VisionTask -Name 'Retention' -Module 'vision.cli.retention' `
     -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $RetentionDay -At $RetentionAt)
 
   # Web: the approval server, started at logon and kept alive.
   $webArgs = "vision.approval.web:create_app --factory --host 127.0.0.1 --port $WebPort"
-  New-VisionTask -Name 'Web' -Exe 'uvicorn.exe' -Arguments $webArgs `
+  New-VisionTask -Name 'Web' -Module 'uvicorn' -Arguments $webArgs `
     -Trigger (New-ScheduledTaskTrigger -AtLogOn) -LongRunning
 
   Write-Host "`nDone. Starting the web + one publisher pass now..." -ForegroundColor Cyan
