@@ -296,9 +296,13 @@ def _build_command(
     command: list[str] = [ffmpeg_exe, "-hide_banner", "-y"]
 
     for clip in clips:
-        # ``-loop 1 -t D`` makes a single still into a D-second stream; the fps is
-        # applied in the filtergraph so the input framerate here is unimportant.
-        command += ["-loop", "1", "-t", f"{clip.duration_seconds}", "-i", str(clip.image_path)]
+        # A SINGLE still frame per scene. zoompan's `d` (see _scene_filter) then
+        # produces exactly duration*fps output frames FROM THAT ONE FRAME — the
+        # canonical Ken Burns pattern. WHY NOT `-loop 1 -t D`: that feeds zoompan a
+        # multi-frame stream and it restarts the zoom per input frame, so the FIRST
+        # scene alone generates thousands of seconds of output and `-shortest` cuts
+        # the reel before later scenes ever play (real-reel bug, 2026-07-08).
+        command += ["-i", str(clip.image_path)]
 
     vo_index = len(clips)
     command += ["-i", str(voiceover_audio_path)]

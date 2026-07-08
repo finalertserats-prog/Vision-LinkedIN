@@ -177,3 +177,36 @@ def test_get_settings_supplies_portrait_canvas_defaults() -> None:
     assert settings.video_width == 1080
     assert settings.video_height == 1920
     assert settings.video_fps == 30
+
+
+@pytest.mark.integration
+def test_later_scene_actually_appears_in_the_reel(tmp_path) -> None:
+    # Regression (2026-07-08): a looped-still input made zoompan multiply frames so
+    # the FIRST scene filled the whole reel and later scenes never played. Render a
+    # 2-scene reel (solid RED then solid BLUE) and assert a late frame is BLUE.
+    import subprocess
+
+    import imageio_ffmpeg
+    from PIL import Image
+
+    from vision.video.assemble import assemble_reel
+
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    red = tmp_path / "red.png"
+    blue = tmp_path / "blue.png"
+    Image.new("RGB", (300, 356), (220, 20, 20)).save(red)
+    Image.new("RGB", (300, 356), (20, 20, 220)).save(blue)
+    wav = tmp_path / "sil.wav"
+    subprocess.run([ff, "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono", "-t", "1.2", str(wav)],
+                   capture_output=True, check=True)
+
+    out = tmp_path / "reel.mp4"
+    assemble_reel([(str(red), "", 0.6), (str(blue), "", 0.6)], str(wav),
+                  out_path=str(out))
+
+    frame = tmp_path / "late.png"
+    subprocess.run([ff, "-y", "-ss", "0.9", "-i", str(out), "-frames:v", "1", str(frame)],
+                   capture_output=True, check=True)
+    with Image.open(frame) as im:
+        r, g, b = im.convert("RGB").resize((1, 1)).getpixel((0, 0))
+    assert b > r, f"late frame should be the BLUE (2nd) scene, got rgb=({r},{g},{b})"
