@@ -360,15 +360,12 @@ def decide_council_image(
         )
         return CouncilImageChoice.none()
 
-    # Rule 3: content heuristic.
-    # A genuine two-sided contrast → the anime contrast card (owner favourite).
+    # Rule 3: the owner's aesthetic is HAND-DRAWN ANIME ART, never text-on-colour
+    # quote cards (owner feedback 2026-07-08 — "not just text images, the anime art").
+    # A genuine two-sided contrast → the anime contrast card; otherwise a text-free
+    # anime concept illustration. Quote cards are retired from the council lane.
     if contrast is not None:
         return CouncilImageChoice(image_type=IMAGE_TYPE_CONTRAST, contrast=contrast)
-    # A strong punchline → deterministic quote card; otherwise a concept illustration.
-    line = _first_line(body)
-    if _is_strong_punchline(line):
-        return CouncilImageChoice(image_type=IMAGE_TYPE_QUOTE_CARD, quote_line=line)
-
     return CouncilImageChoice(
         image_type=IMAGE_TYPE_CONCEPT,
         illustration_prompt=_concept_prompt_from(body),

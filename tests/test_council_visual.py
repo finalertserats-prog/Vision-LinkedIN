@@ -146,16 +146,12 @@ def test_attach_contrast_degrades_to_text_only_when_a_panel_fails(tmp_path: Path
 # --- 1. Decision: punchy post → quote_card ---------------------------------
 
 
-def test_decide_returns_quote_card_for_punchy_one_liner(tmp_path: Path) -> None:
-    # Arrange.
-    settings = _settings(tmp_path)
-
-    # Act.
-    choice = decide_council_image(_PUNCHY_POST, settings=settings)
-
-    # Assert: a punchy first line earns a quote card, carrying that exact line.
-    assert choice.image_type == "quote_card"
-    assert choice.quote_line == "The tools we build quietly rebuild us."
+def test_decide_returns_anime_illustration_even_for_a_punchy_one_liner(tmp_path: Path) -> None:
+    # Owner aesthetic (2026-07-08): hand-drawn ANIME art, never a text quote card —
+    # even when the post opens with a crisp, quotable one-liner.
+    choice = decide_council_image(_PUNCHY_POST, settings=_settings(tmp_path))
+    assert choice.image_type == "concept_illustration"
+    assert choice.illustration_prompt and "no text" in choice.illustration_prompt.lower()
 
 
 # --- 2. Decision: atmospheric post → concept_illustration ------------------
@@ -232,40 +228,31 @@ def test_weekly_cap_blocks_further_images(tmp_path: Path) -> None:
         types.append(str(draft["image_type"]))
 
     # Assert: only the first TWO carried an image; the rest degraded to none.
-    assert types.count("quote_card") == 2
+    assert types.count("concept_illustration") == 2
     assert types.count("none") == 2
 
 
 # --- 6. attach sets quote-card fields on the draft dict --------------------
 
 
-def test_attach_quote_card_sets_image_fields(tmp_path: Path) -> None:
-    # Arrange.
+def test_attach_punchy_post_yields_anime_not_a_quote_card(tmp_path: Path) -> None:
+    # Owner aesthetic: even a punchy post gets a text-free anime illustration; the
+    # quote-card renderer must NOT be called for the council lane.
     settings = _settings(tmp_path)
     draft: dict[str, object] = {"post_text": _PUNCHY_POST}
-    calls: list[str] = []
+    client = _FakeImageClient(_PNG_BYTES)
 
-    def fake_render(quote: str, **_: object) -> bytes:
-        calls.append(quote)
-        return _PNG_BYTES
+    def fail_render(quote: str, **_: object) -> bytes:
+        raise AssertionError("quote card must never render for a council post")
 
-    # Act.
     attach_council_image(
-        draft,
-        settings=settings,
-        render_quote_card=fake_render,
-        image_client=_FakeImageClient(_PNG_BYTES),
+        draft, settings=settings, render_quote_card=fail_render, image_client=client
     )
 
-    # Assert: the quote card is rendered from the punchline and the draft's image_*
-    # fields are set for the mailer/publisher — a real PNG written to disk.
-    assert calls == ["The tools we build quietly rebuild us."]
-    assert draft["image_type"] == "quote_card"
-    assert draft["image_source"] == "deterministic"
-    assert draft["image_prompt"] is None
-    path = Path(str(draft["image_path"]))
-    assert path.exists()
-    assert path.read_bytes() == _PNG_BYTES
+    assert client.calls, "the anime image client should have been asked to illustrate"
+    assert draft["image_type"] == "concept_illustration"
+    assert draft["image_source"] == settings.image_model
+    assert Path(str(draft["image_path"])).exists()
 
 
 # --- 7. attach sets concept-illustration fields on the draft dict ----------
@@ -323,23 +310,19 @@ def test_illustration_failure_degrades_to_none(tmp_path: Path) -> None:
 # --- 9. Quote-card render failure degrades to none -------------------------
 
 
-def test_quote_card_render_failure_degrades_to_none(tmp_path: Path) -> None:
-    # Arrange: the deterministic renderer raises (e.g. a layout ValueError).
+def test_punchy_post_anime_failure_degrades_to_none(tmp_path: Path) -> None:
+    # A punchy post now takes the anime path too; if agy fails it degrades to
+    # text-only rather than falling back to a text card (never blocks the post).
     settings = _settings(tmp_path)
     draft: dict[str, object] = {"post_text": _PUNCHY_POST}
 
-    def boom_render(quote: str, **_: object) -> bytes:
-        raise ValueError("card layout overflowed")
-
-    # Act.
     attach_council_image(
         draft,
         settings=settings,
-        render_quote_card=boom_render,
-        image_client=_FakeImageClient(_PNG_BYTES),
+        render_quote_card=lambda quote, **_: _PNG_BYTES,
+        image_client=_FakeImageClient(ImageGenerationError("agy timed out")),
     )
 
-    # Assert: a render blow-up degrades to text-only, never propagates.
     assert draft["image_type"] == "none"
     assert draft["image_path"] is None
 
@@ -371,7 +354,7 @@ def test_weekly_cap_counts_are_shared_across_types(tmp_path: Path) -> None:
     )
 
     # Assert: the cap is shared — the second draft is text-only.
-    assert draft1["image_type"] == "quote_card"
+    assert draft1["image_type"] == "concept_illustration"
     assert draft2["image_type"] == "none"
 
 

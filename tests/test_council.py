@@ -677,24 +677,27 @@ def test_run_council_defaults_to_no_image(tmp_path: Path) -> None:
     assert draft["image_path"] is None
 
 
-def test_run_council_attaches_quote_card_when_image_lane_enabled(
+def test_run_council_attaches_anime_illustration_when_image_lane_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Arrange: enable the council image lane and MOCK the deterministic renderer so
-    # no real Pillow render runs — the composition's first line is a strong
-    # punchline, so the lane must choose a quote card of that exact line.
+    # Arrange: enable the council image lane and MOCK agy so no real subprocess
+    # runs — even with a punchy opener the lane must choose a text-free ANIME
+    # concept illustration (owner aesthetic), never a text quote card.
     png = b"\x89PNG\r\n\x1a\nfake"
-    rendered: list[str] = []
+    prompts: list[str] = []
 
-    def fake_render(quote: str, **_: object) -> bytes:
-        rendered.append(quote)
+    def fake_illustrate(self: object, prompt: str, model: str | None = None) -> bytes:
+        prompts.append(prompt)
         return png
 
-    monkeypatch.setattr("vision.council.visual.render_quote_card", fake_render, raising=False)
+    monkeypatch.setattr(
+        "vision.brahmastra.image_client.BrahmastraImageClient.illustrate",
+        fake_illustrate,
+        raising=False,
+    )
 
-    # A composition whose FIRST post line is a clean, number-free, hashtag-free
-    # punchline (hashtags live on their own final line, as a real post would) so
-    # the lane chooses a deterministic quote card of that opener.
+    # A composition whose FIRST post line is a clean punchline — under the old logic
+    # this earned a quote card; it must now yield an anime illustration instead.
     composition = (
         "FORMAT: show_the_split\n"
         "SITUATION: disagreed — one voice prized speed, another safety\n"
@@ -730,10 +733,10 @@ def test_run_council_attaches_quote_card_when_image_lane_enabled(
 
     # Assert: the punchline drove a deterministic quote card whose PNG was written,
     # and the draft carries the image_* fields for the mailer/publisher.
-    assert rendered == ["The tools we build quietly rebuild us."]
-    assert draft["image_type"] == "quote_card"
-    assert draft["image_source"] == "deterministic"
-    assert draft["image_prompt"] is None
+    assert prompts, "agy should have been asked to illustrate the post"
+    assert "no text" in prompts[0].lower()  # text-free precision rule holds
+    assert draft["image_type"] == "concept_illustration"
+    assert draft["image_source"] == settings.image_model
     assert Path(draft["image_path"]).read_bytes() == png
 
 
