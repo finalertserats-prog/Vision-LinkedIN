@@ -206,7 +206,10 @@ class Settings(BaseSettings):
     )
     image_max_per_week: int = Field(default=4, alias="IMAGE_MAX_PER_WEEK")
     image_style_guide: str = Field(
-        default="minimal, professional, muted palette, no text, no logos",
+        default=(
+            "elevated hand-drawn anime and manga art, editorial and tasteful, "
+            "emotive, refined linework, no photorealism"
+        ),
         alias="IMAGE_STYLE_GUIDE",
     )
     card_brand_palette: str = Field(

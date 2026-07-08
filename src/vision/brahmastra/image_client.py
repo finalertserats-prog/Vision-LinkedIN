@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import logging
+import random
 import subprocess
 import tempfile
 from pathlib import Path
@@ -45,6 +46,20 @@ _JPEG_MAGIC = b"\xff\xd8\xff"
 # must never bake words/numbers/logos into an illustration, regardless of the
 # owner-editable style guide. The style guide sets taste; this guarantees safety.
 _TEXT_FREE_NEGATIVES = "no text, no words, no letters, no logos"
+
+# The owner is an anime/manga devotee and wants EVERY visual to be hand-drawn art,
+# tuned to the elevated/editorial end so it reads as a distinctive personal brand
+# on LinkedIn (not kiddie cartoon). A rotating sub-style gives run-to-run variety
+# (the "keep changing it" principle) while staying inside the anime/hand-drawn
+# family. One is picked per generation and layered onto IMAGE_STYLE_GUIDE.
+_ART_STYLES: tuple[str, ...] = (
+    "cinematic anime film still, Studio Ghibli-inspired, soft cel shading, "
+    "painterly backgrounds",
+    "expressive black-and-white manga ink illustration, clean screentone, dynamic linework",
+    "delicate graphite pencil sketch, fine cross-hatching, hand-drawn on paper",
+    "soft watercolor anime concept art, muted washes, atmospheric light",
+    "modern anime key visual, refined line art, dramatic lighting, emotive composition",
+)
 
 
 class BrahmastraImageClient:
@@ -129,8 +144,11 @@ class BrahmastraImageClient:
         phrased. Both lead so agy reads the constraints first.
         """
         guide = self._settings.image_style_guide.strip().rstrip(".")
+        # Layer a rotating anime/hand-drawn sub-style for run-to-run variety within
+        # the owner's art-only house aesthetic (see _ART_STYLES).
+        art_style = random.choice(_ART_STYLES)
         concept = prompt.strip()
-        return f"{guide}, {_TEXT_FREE_NEGATIVES}. {concept}"
+        return f"{guide}, {art_style}, {_TEXT_FREE_NEGATIVES}. {concept}"
 
     # -- agy invocation -----------------------------------------------------
 

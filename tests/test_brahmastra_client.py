@@ -457,6 +457,21 @@ def test_illustrate_prompt_is_text_free_style_guided() -> None:
     assert "no logos" in prompt
 
 
+def test_illustrate_prompt_carries_a_rotating_anime_art_style() -> None:
+    # The owner wants every visual as hand-drawn art; a rotating sub-style from
+    # _ART_STYLES is layered onto the prompt for run-to-run variety.
+    from vision.brahmastra.image_client import _ART_STYLES
+
+    client = _image_client()
+    with patch("vision.brahmastra.image_client.subprocess.run") as mock_run:
+        mock_run.side_effect = _agy_writes("PNG")
+        client.illustrate("an abstract muted horizon")
+
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("-p") + 1]
+    assert any(style in prompt for style in _ART_STYLES)
+
+
 def test_illustrate_uses_confirmed_agy_agent_invocation() -> None:
     # Arrange.
     client = _image_client()
