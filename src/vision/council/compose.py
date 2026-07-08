@@ -474,6 +474,58 @@ class Composer:
             "<right scene, text-free>"
         )
 
+    def _build_problem_prompt(self, delib: Deliberation, problem: str) -> str:
+        """Assemble the compose prompt for a real-problem 'overcome story'.
+
+        ``problem`` is GROUND TRUTH; the deliberation is private sharpening material.
+        Reuses the SAME output contract as :meth:`_build_prompt` so ``_parse_composition``
+        and every gate behave identically for both lanes.
+        """
+        transcript = "\n\n".join(
+            f"{voice} (round 1): {delib.round1[voice]}\n{voice} (round 2): {delib.round2[voice]}"
+            for voice in VOICE_ORDER
+        )
+        return (
+            "You are a GHOST-WRITER for the owner's personal LinkedIn. You write in the "
+            f"owner's OWN natural first-person voice as {VOICE_PROFILE}\n\n"
+            "This is the 'problems and how we overcame them' series. Below is a REAL "
+            "problem the owner actually faced and worked through. Treat EVERY detail as "
+            "GROUND TRUTH: never invent, exaggerate, or contradict it. If a detail is "
+            "not given, keep it general rather than making it up:\n\n"
+            f"{problem}\n\n"
+            "Below is a PRIVATE deliberation that sharpened the angle and lesson — RAW "
+            "MATERIAL only, never shown or referenced:\n"
+            f"{transcript}\n\n"
+            "HARD RULES:\n"
+            "- Tell the STORY: the problem, what was tried, the turn where it got "
+            "solved, and the earned lesson. Concrete and specific to what actually "
+            "happened - a builder sharing a real war story, not an abstract essay.\n"
+            "- NEVER narrate the machinery. No AI/model names; do NOT mention a "
+            "'council', 'voices', a 'debate' or a 'deliberation'. It is the OWNER "
+            "recounting their own experience, and it must START straight from the story.\n"
+            "- Keep any tech CONCRETE: how it actually broke, worked, or got fixed - "
+            "never vague philosophy.\n"
+            "- NO EM-DASHES (owner rule): use a plain hyphen, comma, colon, or two "
+            "shorter sentences instead. Target ZERO em-dashes.\n\n"
+            "TASK:\n"
+            "1. HONESTY GATE (private, NOT for the post): note whether this was a clean "
+            "win, a partial fix, or mostly a lesson learned. It shapes the post only.\n"
+            "2. Write a LinkedIn post (700-1600 chars) as the owner's OWN natural "
+            "first-person account of the problem and how it was overcome, ending on the "
+            "earned lesson. Make it useful to someone facing something similar. 3-5 "
+            "hashtags. No AI names, no machinery talk.\n\n"
+            "OUTPUT FORMAT (strict): PLAIN TEXT only. Do NOT use Markdown - no **bold**, "
+            "no ## headings, no '---' rules, no backticks. Do NOT write any preamble or "
+            "explanation. Your reply MUST begin with the literal characters 'FORMAT:' "
+            "and include the literal headers FORMAT:, SITUATION:, POST:, and COUNCIL: "
+            "each on its own line:\n"
+            "FORMAT: problem_solved\n"
+            "SITUATION: <clean win|partial fix|lesson> - <one line why>\n"
+            "POST:\n<the story>\n"
+            "COUNCIL:\n- <angle 1>\n- <angle 2>\n- <angle 3>\n"
+            "Powered by Brahmastra"
+        )
+
     def compose(self, delib: Deliberation) -> ComposedPost:
         """Compose the de-named post from ``delib`` and return the parsed result.
 
@@ -491,7 +543,23 @@ class Composer:
             ForbiddenNameError: when the composed post or council block names any
                 AI/model/vendor — the leak aborts the compose (never published).
         """
-        prompt = self._build_prompt(delib)
+        return self._compose_from_prompt(self._build_prompt(delib))
+
+    def compose_problem(self, delib: Deliberation, problem: str) -> ComposedPost:
+        """Compose the 'problem & how we overcame it' post, grounded in ``problem``.
+
+        Same parsing + fail-closed gates as :meth:`compose`, but the prompt tells the
+        story of a REAL problem the owner faced (``problem`` is GROUND TRUTH — never
+        invented or contradicted); the deliberation only sharpens the angle + lesson.
+        """
+        return self._compose_from_prompt(self._build_problem_prompt(delib, problem))
+
+    def _compose_from_prompt(self, prompt: str) -> ComposedPost:
+        """Run the compose voice on ``prompt`` with retries + fail-closed gates.
+
+        Shared by :meth:`compose` and :meth:`compose_problem` so BOTH content lanes
+        get identical de-naming / em-dash / parse-miss guarantees (§13.0).
+        """
         last_error = "no attempts made"
         # Up to 3 attempts: the composing voice is non-deterministic, so a one-off
         # parse miss (the editor dropped the POST:/COUNCIL: markers — seen on the

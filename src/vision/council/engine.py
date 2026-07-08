@@ -23,6 +23,7 @@ from vision.config import Settings, get_settings
 from vision.council.compose import Composer
 from vision.council.deliberate import Deliberation, Deliberator
 from vision.council.formats import RecentFormatStore
+from vision.council.problems import ProblemQueue
 from vision.council.topics import TopicEngine
 from vision.council.visual import attach_council_image
 from vision.council.voices import VOICE_ORDER, Voices
@@ -45,6 +46,23 @@ def _build_transcript(delib: Deliberation) -> dict[str, dict[str, str]]:
         voice: {"round1": delib.round1.get(voice, ""), "round2": delib.round2.get(voice, "")}
         for voice in VOICE_ORDER
     }
+
+
+def _frame_problem(problem: str) -> str:
+    """Frame a real problem blob as the deliberation subject (grounded, no invention)."""
+    return (
+        "A real problem the author actually faced and worked through. Treat it as "
+        "ground truth and do NOT invent facts:\n\n"
+        f"{problem}\n\n"
+        "What is the sharpest, most useful angle and the real, earned lesson here - "
+        "the thing worth sharing so someone facing something similar gets value?"
+    )
+
+
+def _problem_label(problem: str) -> str:
+    """A short human-glanceable label (the blob's first non-empty line, bounded)."""
+    first = next((ln.strip() for ln in problem.splitlines() if ln.strip()), "a problem we solved")
+    return first[:120]
 
 
 def run_council(
@@ -105,13 +123,24 @@ def run_council(
     deliberator = Deliberator(voices=voices, settings=settings)
     composer = Composer(voices=voices, recent_store=recent_store, settings=settings)
 
-    # 1. TOPIC. An explicit topic wins; otherwise the engine chooses (fail-closed
-    #    inside pick_topic if it can find nothing).
-    chosen_topic = topic if (topic and topic.strip()) else topic_engine.pick_topic()
-    logger.info("Council running on topic: %s", chosen_topic)
+    # 1. SOURCE (seeds-first, ADD-ON — the auto-topic path is unchanged when the
+    #    problem inbox is empty). A queued real problem (the owner's freeform
+    #    brain-dump) becomes the day's GROUNDED 'overcome story' before any auto
+    #    topic. An explicit topic still wins over both.
+    problem = None
+    if not (topic and topic.strip()):
+        problem = ProblemQueue(settings).consume_head()
 
-    # 2. DELIBERATE. Fail-soft per voice, fail-closed on <2 takes (raises).
-    deliberation = deliberator.deliberate(chosen_topic)
+    if problem is not None:
+        chosen_topic = _problem_label(problem)
+        logger.info("Council running on a seeded PROBLEM: %s", chosen_topic)
+        deliberation = deliberator.deliberate(_frame_problem(problem))
+    else:
+        chosen_topic = topic if (topic and topic.strip()) else topic_engine.pick_topic()
+        logger.info("Council running on topic: %s", chosen_topic)
+        deliberation = deliberator.deliberate(chosen_topic)
+
+    # 2. Fail-soft per voice, fail-closed on <2 takes (raised inside deliberate()).
     live = deliberation.live_voices()
     if len(live) < len(VOICE_ORDER):
         # Degraded-but-valid: log which voices are missing for observability.
@@ -121,8 +150,13 @@ def run_council(
             len(VOICE_ORDER),
         )
 
-    # 3. COMPOSE. Fail-closed on empty output (raises).
-    composed = composer.compose(deliberation)
+    # 3. COMPOSE. The problem lane writes the grounded overcome-story; otherwise the
+    #    standard post. Both share every fail-closed gate. Fail-closed on empty.
+    composed = (
+        composer.compose_problem(deliberation, problem)
+        if problem is not None
+        else composer.compose(deliberation)
+    )
 
     # 4. ASSEMBLE the Draft-shaped dict. ``model_trace`` records per-stage
     #    provenance (which voices were live, the chosen format/situation) so the

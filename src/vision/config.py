@@ -141,6 +141,13 @@ class Settings(BaseSettings):
     council_topic_queue_path: str = Field(
         default="prep/council_topics.txt", alias="COUNCIL_TOPIC_QUEUE_PATH"
     )
+    # The owner's freeform "problem brain-dump" inbox: real problems + how they were
+    # overcome, one blob per entry separated by a '---' line. Seeds-first — a queued
+    # problem becomes the day's GROUNDED post ('problems & how we overcame them'
+    # series) before any auto-topic. The owner just appends to this file.
+    council_problem_queue_path: str = Field(
+        default="prep/problems.md", alias="COUNCIL_PROBLEM_QUEUE_PATH"
+    )
     # Guardrail: topics the council must NEVER touch. Any proposed/queued topic
     # whose text contains one of these (case-insensitive substring) is filtered
     # out. Editable via a comma-separated env value (pydantic parses the list).

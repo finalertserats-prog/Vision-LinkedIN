@@ -758,6 +758,36 @@ def test_run_council_attaches_anime_illustration_when_image_lane_enabled(
     assert Path(draft["image_path"]).read_bytes() == png
 
 
+def test_run_council_uses_seeded_problem_over_auto_topic(tmp_path: Path) -> None:
+    # Seeds-first: a queued real problem drives a GROUNDED overcome-story post and
+    # is consumed. The auto-topic path is NOT used when a problem is present.
+    prob_file = tmp_path / "problems.md"
+    prob_file.write_text(
+        "Our anime image generation kept timing out at 200s and dropping the picture "
+        "entirely. We raised the ceiling to 300s and it stopped. Lesson: agy slows "
+        "under concurrent load.\n",
+        encoding="utf-8",
+    )
+    problem_post = (
+        "FORMAT: problem_solved\nSITUATION: clean win - fixed the timeout\n"
+        "POST:\n"
+        + ("Our image generation kept timing out under load and dropping the picture. " * 8)
+        + "\nCOUNCIL:\n- a\n- b\n- c\nPowered by Brahmastra"
+    )
+
+    def responder(voice: str, prompt: str) -> str:
+        # The problem-lane compose prompt carries this series marker.
+        if "problems and how we overcame them" in prompt:
+            return problem_post
+        return f"{voice} take"
+
+    settings = _settings(tmp_path, COUNCIL_PROBLEM_QUEUE_PATH=str(prob_file))
+    draft = run_council(voices=FakeVoices(responder), settings=settings)
+
+    assert "timing out" in draft["post_text"].lower()
+    assert prob_file.read_text(encoding="utf-8").strip() == ""  # queue consumed
+
+
 def test_run_council_uses_explicit_topic_over_queue(tmp_path: Path) -> None:
     # Arrange: an explicit topic must bypass the topic engine entirely.
     def responder(voice: str, prompt: str) -> str:
