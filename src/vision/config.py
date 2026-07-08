@@ -222,6 +222,20 @@ class Settings(BaseSettings):
         default="navy=#0B1F3A;gold=#C9A24B", alias="CARD_BRAND_PALETTE"
     )
 
+    # --- Data lifecycle: retention + backup + prune -----------------------
+    # A weekly job archives rows/images older than the window, backs the archive
+    # up to Google Drive via rclone, VERIFIES the upload, and only THEN prunes
+    # locally + VACUUMs. Fail-closed: nothing is pruned without a verified backup.
+    retention_enabled: bool = Field(default=True, alias="RETENTION_ENABLED")
+    retention_days: int = Field(default=30, alias="RETENTION_DAYS")
+    retention_archive_dir: str = Field(default="archive", alias="RETENTION_ARCHIVE_DIR")
+    # rclone drives the off-box backup. An empty remote name = Drive upload is not
+    # configured yet: the job archives locally and SKIPS the prune (never deletes
+    # data it could not back up).
+    rclone_bin: str = Field(default="rclone", alias="RCLONE_BIN")
+    rclone_remote: str = Field(default="", alias="RCLONE_REMOTE")
+    rclone_drive_path: str = Field(default="VISION/backups", alias="RCLONE_DRIVE_PATH")
+
     # --- Author / signature (§15.6, D9) -----------------------------------
     post_signature_mode: SignatureMode = Field(
         default=SignatureMode.CARD_WATERMARK, alias="POST_SIGNATURE_MODE"

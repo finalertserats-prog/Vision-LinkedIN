@@ -9,6 +9,7 @@
     Vision-Publisher  ~3 min -> publish every APPROVED & due draft to LinkedIn (with image)
     Vision-Expire     daily  -> expire un-actioned drafts at the cutoff
     Vision-Web        logon  -> the approval web server (serves the email Approve links)
+    Vision-Retention  weekly -> archive >30d data -> Google Drive (rclone) -> prune + VACUUM
 
   Nothing publishes without the human: the poller only touches drafts the owner
   approved via the emailed link. Council just emails; expire just cleans up.
@@ -31,7 +32,10 @@ param(
   [string]$CouncilAt = '08:00',
   [string]$ExpireAt = '20:00',
   [int]$PollMinutes = 3,
-  [int]$WebPort = 8000
+  [int]$WebPort = 8000,
+  [string]$RetentionAt = '03:30',
+  [ValidateSet('Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday')]
+  [string]$RetentionDay = 'Sunday'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,7 +46,7 @@ $Venv = Join-Path $Root '.venv\Scripts'
 $User = "$env:USERDOMAIN\$env:USERNAME"
 
 function Assert-Paths {
-  foreach ($exe in 'vision-council.exe', 'vision-publisher.exe', 'vision-expire.exe', 'uvicorn.exe') {
+  foreach ($exe in 'vision-council.exe', 'vision-publisher.exe', 'vision-expire.exe', 'vision-retention.exe', 'uvicorn.exe') {
     $p = Join-Path $Venv $exe
     if (-not (Test-Path $p)) { throw "Missing venv executable: $p (is the venv built?)" }
   }
@@ -103,6 +107,10 @@ function Install-Tasks {
   # Expire: once daily at the cutoff.
   New-VisionTask -Name 'Expire' -Exe 'vision-expire.exe' `
     -Trigger (New-ScheduledTaskTrigger -Daily -At $ExpireAt)
+
+  # Retention: weekly archive -> Drive backup -> prune (off-hours, low traffic).
+  New-VisionTask -Name 'Retention' -Exe 'vision-retention.exe' `
+    -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $RetentionDay -At $RetentionAt)
 
   # Web: the approval server, started at logon and kept alive.
   $webArgs = "vision.approval.web:create_app --factory --host 127.0.0.1 --port $WebPort"
