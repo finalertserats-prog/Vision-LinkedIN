@@ -26,6 +26,7 @@ from vision.config import Settings
 from vision.council.compose import (
     Composer,
     ForbiddenNameError,
+    _strip_em_dashes,
     contains_forbidden_name,
     find_forbidden_name,
 )
@@ -34,6 +35,17 @@ from vision.council.engine import run_council
 from vision.council.formats import FORMATS, RecentFormatStore
 from vision.council.topics import TopicEngine
 from vision.council.voices import CLAUDE, CODEX, GEMINI, VOICE_ORDER, Voices
+
+
+def test_strip_em_dashes_replaces_em_and_en_dashes_with_hyphen():
+    # Owner rule: em-dashes read as an AI tell; posts must ship hyphens instead.
+    spaced = "The theft isn't in being predicted — it's in the ceasing to notice."
+    tight = "cause—effect, 2020–2026"
+    assert _strip_em_dashes(spaced) == (
+        "The theft isn't in being predicted - it's in the ceasing to notice."
+    )
+    assert _strip_em_dashes(tight) == "cause-effect, 2020-2026"
+    assert "—" not in _strip_em_dashes(spaced)
 
 
 # --- Test doubles -----------------------------------------------------------

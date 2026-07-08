@@ -109,6 +109,16 @@ _FORBIDDEN_NAME_RE = re.compile(
 # Matches a "#hashtag" token (letters/digits/underscore after the hash).
 _HASHTAG_RE = re.compile(r"#\w+")
 
+# Owner rule (2026-07-08): em-dashes are a well-known tell that AI wrote the text.
+# Map em-dash and en-dash to a plain hyphen so published posts read as human-authored.
+# A spaced em-dash (" — ") becomes " - "; a tight one ("a—b") becomes "a-b".
+_EM_DASHES = str.maketrans({"—": "-", "–": "-"})
+
+
+def _strip_em_dashes(text: str) -> str:
+    """Replace em/en dashes with a plain hyphen (owner authenticity rule)."""
+    return text.translate(_EM_DASHES)
+
 
 @dataclass
 class ComposedPost:
@@ -220,8 +230,8 @@ def _parse_composition(raw: str) -> ComposedPost:
         elif section == "council":
             council_lines.append(line)
 
-    post_text = "\n".join(post_lines).strip()
-    council_block = "\n".join(council_lines).strip()
+    post_text = _strip_em_dashes("\n".join(post_lines).strip())
+    council_block = _strip_em_dashes("\n".join(council_lines).strip())
     hashtags = _HASHTAG_RE.findall(post_text)
     return ComposedPost(
         format=fmt,
@@ -287,7 +297,11 @@ class Composer:
             "it is repetitive and cringe. Vary how the post connects run-to-run, and OFTEN "
             "let the IDEA carry it with NO personal anchor at all. A personal detail is earned "
             "only when it genuinely sharpens the point, never a reflex. For THIS post, lean "
-            f"toward this way in: {random.choice(_LENSES)} — but the idea always comes first.\n\n"
+            f"toward this way in: {random.choice(_LENSES)}, but the idea always comes first.\n"
+            "- NO EM-DASHES (owner rule, important): do NOT use em-dashes (the long dash) "
+            "anywhere in the post. Overusing them is a well-known tell that an AI wrote the "
+            "text and it reads as inauthentic. Use a plain hyphen, a comma, a colon, "
+            "parentheses, or simply two shorter sentences instead. Target ZERO em-dashes.\n\n"
             "TASK:\n"
             "1. HONESTY GATE: judge whether the council genuinely DISAGREED, AGREED, or one "
             "voice SHIFTED. Never manufacture a fight that didn't happen.\n"
