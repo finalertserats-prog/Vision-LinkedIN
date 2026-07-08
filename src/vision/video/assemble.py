@@ -58,6 +58,14 @@ _KENBURNS_END_ZOOM = 1.08
 # crisp — zoompan upscaling a 1x frame softens edges.
 _KENBURNS_SUPERSAMPLE = 2
 
+# --- No-crop vertical fill --------------------------------------------------
+# The anime stills are square-ish; cover-cropping them to 9:16 cut the subjects
+# off ("all cut"). Instead we CONTAIN the whole image (nothing lost) over a
+# blurred, darkened cover-fill of the SAME image - the standard, polished way to
+# put non-vertical art into a vertical frame so the subject is always fully visible.
+_BG_BLUR_SIGMA = 22  # gaussian blur on the background fill
+_BG_DARKEN = 0.22  # brightness drop on the background so the foreground subject pops
+
 # --- Caption (drawtext) geometry -------------------------------------------
 # WHY lower-third: the caption must not cover the anime subject (usually centred)
 # and must clear the platform's bottom UI chrome. These are fractions of height.
@@ -191,12 +199,6 @@ def _scene_filter(
     frames = max(1, round(clip.duration_seconds * fps))
     big_w, big_h = width * _KENBURNS_SUPERSAMPLE, height * _KENBURNS_SUPERSAMPLE
 
-    # Cover-fill: scale up preserving aspect (force_original_aspect_ratio=increase)
-    # then centre-crop to the exact over-sampled box — no letterboxing, ever.
-    cover = (
-        f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,"
-        f"crop={big_w}:{big_h}"
-    )
     # Linear zoom from 1.0 to end-zoom across the clip; pan holds centre.
     zoom_expr = f"min(zoom+{(_KENBURNS_END_ZOOM - 1.0):.6f}/{frames},{_KENBURNS_END_ZOOM})"
     kenburns = (
@@ -204,7 +206,20 @@ def _scene_filter(
         f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
         f":s={width}x{height}:fps={fps}"
     )
-    chain = f"[{index}:v]{cover},{kenburns},setsar=1,fps={fps}"
+    # NO-CROP vertical fill: split the still; a blurred + darkened COVER version
+    # fills the frame as background, the whole image (CONTAIN, nothing cut) sits
+    # centred on top. Composite at the supersampled size, then Ken Burns down to
+    # the final canvas so the zoom stays crisp. ``b`` disambiguates node labels.
+    b = index
+    chain = (
+        f"[{b}:v]split=2[bg{b}][fg{b}];"
+        f"[bg{b}]scale={big_w}:{big_h}:force_original_aspect_ratio=increase,"
+        f"crop={big_w}:{big_h},gblur=sigma={_BG_BLUR_SIGMA},"
+        f"eq=brightness=-{_BG_DARKEN}[bgb{b}];"
+        f"[fg{b}]scale={big_w}:{big_h}:force_original_aspect_ratio=decrease[fgc{b}];"
+        f"[bgb{b}][fgc{b}]overlay=(W-w)/2:(H-h)/2,setsar=1[base{b}];"
+        f"[base{b}]{kenburns},setsar=1,fps={fps}"
+    )
 
     caption = clip.on_screen_text.strip()
     if caption:
