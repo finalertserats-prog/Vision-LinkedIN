@@ -640,7 +640,7 @@ def test_run_council_returns_draft_shaped_dict(tmp_path: Path) -> None:
     def responder(voice: str, prompt: str) -> str:
         # Deliberation rounds get a per-voice take; the compose pass (recognisable
         # by the editor preamble) gets the fixed-shape composition.
-        if "editor of the BRAHMASTRA" in prompt:
+        if "GHOST-WRITER for the owner" in prompt:
             return _GOOD_COMPOSITION
         return f"{voice} genuine take"
 
@@ -667,7 +667,7 @@ def test_run_council_defaults_to_no_image(tmp_path: Path) -> None:
     # Arrange: the council image lane defaults OFF (fail-closed §22.9), so a plain
     # run must leave the draft text-only regardless of the post's punchiness.
     def responder(voice: str, prompt: str) -> str:
-        return _GOOD_COMPOSITION if "editor of the BRAHMASTRA" in prompt else f"{voice} take"
+        return _GOOD_COMPOSITION if "GHOST-WRITER for the owner" in prompt else f"{voice} take"
 
     # Act.
     draft = run_council(voices=FakeVoices(responder), settings=_settings(tmp_path))
@@ -718,7 +718,7 @@ def test_run_council_attaches_anime_illustration_when_image_lane_enabled(
     )
 
     def responder(voice: str, prompt: str) -> str:
-        return composition if "editor of the BRAHMASTRA" in prompt else f"{voice} take"
+        return composition if "GHOST-WRITER for the owner" in prompt else f"{voice} take"
 
     settings = _settings(
         tmp_path,
@@ -743,7 +743,7 @@ def test_run_council_attaches_anime_illustration_when_image_lane_enabled(
 def test_run_council_uses_explicit_topic_over_queue(tmp_path: Path) -> None:
     # Arrange: an explicit topic must bypass the topic engine entirely.
     def responder(voice: str, prompt: str) -> str:
-        return _GOOD_COMPOSITION if "editor of the BRAHMASTRA" in prompt else f"{voice} take"
+        return _GOOD_COMPOSITION if "GHOST-WRITER for the owner" in prompt else f"{voice} take"
 
     # Act.
     draft = run_council(
@@ -757,7 +757,7 @@ def test_run_council_uses_explicit_topic_over_queue(tmp_path: Path) -> None:
 def test_run_council_fails_closed_when_council_cannot_deliberate(tmp_path: Path) -> None:
     # Arrange: only one voice answers the deliberation → not a real council.
     def responder(voice: str, prompt: str) -> str:
-        if "editor of the BRAHMASTRA" in prompt:
+        if "GHOST-WRITER for the owner" in prompt:
             return _GOOD_COMPOSITION
         return "solo take" if voice == GEMINI else ""
 
