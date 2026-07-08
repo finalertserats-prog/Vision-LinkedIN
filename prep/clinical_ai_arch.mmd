@@ -1,0 +1,69 @@
+---
+config:
+  flowchart:
+    curve: basis
+    nodeSpacing: 40
+    rankSpacing: 55
+    padding: 8
+---
+flowchart TB
+  subgraph CLIENT["Clinician workspace"]
+    direction LR
+    UI["Query UI"]
+    CTX["Patient context (EHR)"]
+  end
+
+  subgraph GROUND["Grounding layer - retrieved evidence only"]
+    direction LR
+    VEC[("Guideline<br/>vector store")]
+    FORM[("Formulary DB")]
+    REC[("Patient<br/>record store")]
+    RET["Retriever"]
+    VEC --> RET
+    FORM --> RET
+    REC --> RET
+  end
+
+  subgraph REASON["Reasoning layer"]
+    direction LR
+    LLM["LLM<br/>evidence-grounded"]
+    CONF["Calibration /<br/>confidence scorer"]
+    ABST{"Abstention<br/>controller"}
+    LLM --> CONF --> ABST
+  end
+
+  subgraph SAFE["Action gate"]
+    direction LR
+    GUARD["Guardrail policy<br/>no autonomous dx / dosing / tx"]
+    QUEUE{"Clinician<br/>review queue"}
+    GUARD --> QUEUE
+  end
+
+  PHI{{"PHI boundary<br/>de-identify · scope access"}}
+  OUT["Documented, cited suggestion"]
+  STOP["Abstain -> escalate to a human"]
+  AUD[("Audit + provenance<br/>every output traced to sources")]
+
+  UI --> PHI
+  CTX --> PHI
+  PHI --> RET
+  RET --> LLM
+  ABST -->|"grounded + confident"| GUARD
+  ABST -->|"uncertain"| STOP
+  QUEUE -->|"approved"| OUT
+  QUEUE -->|"rejected"| STOP
+  OUT --> AUD
+  STOP -.-> AUD
+  ABST -.-> AUD
+  GUARD -.-> AUD
+
+  classDef default fill:#ffffff,stroke:#aab4c0,stroke-width:1.2px,color:#2b3a4a;
+  classDef store fill:#eef1f4,stroke:#9aa7b5,stroke-width:1.2px,color:#33414f;
+  classDef decision fill:#e6edf4,stroke:#7c98b6,stroke-width:1.3px,color:#2b3d52;
+  classDef guard fill:#f4ecdc,stroke:#c2a05a,stroke-width:1.3px,color:#5a4a24;
+  classDef stop fill:#f0e0e0,stroke:#b58080,stroke-width:1.4px,color:#5f2a2a;
+  class VEC,FORM,REC,AUD store;
+  class ABST,QUEUE decision;
+  class PHI,GUARD guard;
+  class STOP stop;
+  linkStyle default stroke:#9aa7b5,stroke-width:1.3px;
