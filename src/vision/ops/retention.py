@@ -20,11 +20,12 @@ NEVER pruned: ``own_posts`` (dedup memory), ``oauth_tokens`` (live credentials),
 
 from __future__ import annotations
 
+import base64
 import gzip
 import json
 import logging
-import shutil
 import subprocess
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -152,7 +153,9 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         if isinstance(val, datetime):
             out[col.key] = val.isoformat()
         elif isinstance(val, (bytes, bytearray)):
-            out[col.key] = f"<{len(val)} bytes omitted>"
+            # base64 so the JSON archive is LOSSLESS (a blob column can be fully
+            # restored), not just a placeholder (Codex review).
+            out[col.key] = {"__b64__": base64.b64encode(bytes(val)).decode("ascii")}
         else:
             out[col.key] = val if _json_safe(val) else str(val)
     return out
@@ -214,11 +217,18 @@ def run_retention(
             to_delete[spec.name] = rows
             report.archived_rows[spec.name] = len(rows)
 
-    # Old images not referenced by any surviving (kept) draft.
+    # Old images not referenced by a SURVIVING draft. Build the keep-set from
+    # drafts that will REMAIN after this run — excluding the terminal drafts we are
+    # about to archive/delete, whose images must be free to archive + prune (Codex
+    # review: using all drafts leaked those images forever).
+    pruned_draft_ids = {d.id for d in to_delete.get("drafts", [])}
     kept_image_paths = {
-        p for (p,) in session.execute(select(Draft.image_path).where(Draft.image_path.isnot(None)))
+        p
+        for (did, p) in session.execute(
+            select(Draft.id, Draft.image_path).where(Draft.image_path.isnot(None))
+        )
+        if did not in pruned_draft_ids
     }
-    kept_image_paths.discard(None)
     old_images = _old_images(
         image_dir or Path("prep"), cutoff, {str(p) for p in kept_image_paths}
     )
@@ -243,13 +253,14 @@ def run_retention(
     if _snapshot_db(session, snapshot):
         staged.append(snapshot)
 
-    # Copy old images alongside the bundle so the backup is self-contained.
-    img_archive = archive_dir / f"images-{stamp}"
+    # Zip old images into ONE artifact so backup + hash-verify are file-based
+    # (Codex review: uploading a directory made rclone's --include verify unreliable).
     if old_images:
-        img_archive.mkdir(exist_ok=True)
-        for png in old_images:
-            shutil.copy2(png, img_archive / png.name)
-        staged.append(img_archive)
+        img_zip = archive_dir / f"images-{stamp}.zip"
+        with zipfile.ZipFile(img_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for png in old_images:
+                zf.write(png, arcname=png.name)
+        staged.append(img_zip)
 
     # 2) BACK UP + VERIFY every staged artifact. If rclone is unconfigured or ANY
     # upload/verify fails, keep the local archive and DO NOT prune (fail-closed —

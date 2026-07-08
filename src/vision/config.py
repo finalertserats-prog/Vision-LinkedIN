@@ -227,7 +227,9 @@ class Settings(BaseSettings):
     # up to Google Drive via rclone, VERIFIES the upload, and only THEN prunes
     # locally + VACUUMs. Fail-closed: nothing is pruned without a verified backup.
     retention_enabled: bool = Field(default=True, alias="RETENTION_ENABLED")
-    retention_days: int = Field(default=30, alias="RETENTION_DAYS")
+    # ge=1 guards a destructive job against a fat-fingered 0/negative window that
+    # would archive+prune everything at once (Codex review).
+    retention_days: int = Field(default=30, ge=1, alias="RETENTION_DAYS")
     retention_archive_dir: str = Field(default="archive", alias="RETENTION_ARCHIVE_DIR")
     # rclone drives the off-box backup. An empty remote name = Drive upload is not
     # configured yet: the job archives locally and SKIPS the prune (never deletes

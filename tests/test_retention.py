@@ -7,10 +7,13 @@ rows survive, (3) an unconfigured/failed backup keeps everything.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -148,6 +151,54 @@ def test_rclone_uploader_requires_copy_and_verify_to_pass(tmp_path: Path) -> Non
     assert up.configured() is True
     assert up.upload(f) is True
     assert [c[1] for c in calls] == ["copy", "check"]  # verify always follows copy
+
+
+def _old_png(image_dir: Path, name: str) -> Path:
+    image_dir.mkdir(parents=True, exist_ok=True)
+    png = image_dir / name
+    png.write_bytes(b"\x89PNG\r\n\x1a\n stub")
+    os.utime(png, (_OLD.timestamp(), _OLD.timestamp()))  # backdate mtime
+    return png
+
+
+def test_image_of_pruned_draft_is_archived_and_removed(db_session: Session, tmp_path: Path) -> None:
+    # Codex regression: an image referenced ONLY by an old terminal draft (which is
+    # itself being pruned) must be archived + removed, not leaked forever.
+    _seed(db_session)
+    imgdir = tmp_path / "img"
+    png = _old_png(imgdir, "old.png")
+    d = db_session.execute(select(Draft).where(Draft.post_text == "old published")).scalar_one()
+    d.image_path = str(png)
+    db_session.commit()
+    up = _FakeUploader(ok=True)
+
+    report = run_retention(db_session, _settings(tmp_path), now=_NOW, uploader=up,
+                           archive_dir=tmp_path / "archive", image_dir=imgdir)
+
+    assert report.archived_images == 1
+    assert report.pruned is True
+    assert not png.exists()  # removed only after the verified backup
+    assert any(n.startswith("images-") and n.endswith(".zip") for n in up.uploaded)
+
+
+def test_image_only_run_is_not_pruned_when_backup_fails(db_session: Session, tmp_path: Path) -> None:
+    # An image-only run whose backup fails must keep the image (fail-closed) — the
+    # exact case Codex flagged as silently succeeding.
+    imgdir = tmp_path / "img"
+    png = _old_png(imgdir, "orphan.png")  # old, referenced by no draft
+    up = _FakeUploader(ok=False)
+
+    report = run_retention(db_session, _settings(tmp_path), now=_NOW, uploader=up,
+                           archive_dir=tmp_path / "archive", image_dir=imgdir)
+
+    assert report.archived_images == 1
+    assert report.backed_up is False and report.pruned is False
+    assert png.exists()  # never deleted without a verified backup
+
+
+def test_retention_days_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        _settings(tmp_path, RETENTION_DAYS=0)
 
 
 def test_rclone_uploader_fails_when_verify_fails(tmp_path: Path) -> None:

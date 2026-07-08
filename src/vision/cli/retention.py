@@ -43,8 +43,11 @@ def main() -> int:
     )
     # A configured-but-failed backup is a real problem worth a non-zero exit so the
     # scheduler surfaces it; an unconfigured rclone (archived locally) is a clean
-    # no-op the owner opted into until they run `rclone config`.
-    if settings.rclone_remote.strip() and not report.backed_up and report.total_rows:
+    # no-op the owner opted into until they run `rclone config`. Gate on ANY staged
+    # artifact (rows, images, or the archive file) so an image-only run whose backup
+    # failed still alerts (Codex review: gating on rows alone hid image-only failures).
+    staged_something = bool(report.total_rows or report.archived_images or report.archive_path)
+    if settings.rclone_remote.strip() and not report.backed_up and staged_something:
         return 1
     return 0
 
