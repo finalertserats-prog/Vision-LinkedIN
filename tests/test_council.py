@@ -561,6 +561,24 @@ def test_exclusion_list_filters_proposed_topics(tmp_path: Path) -> None:
     assert "Why naps are underrated" in topics
 
 
+def test_propose_topics_drops_leaked_preamble_line(tmp_path: Path) -> None:
+    # The model sometimes prepends a scaffolding line ("Here are 3 topics:") despite
+    # the no-prose instruction — it must never survive as a candidate topic.
+    proposed = (
+        "Here are 3 topics for this round:\n"
+        "As AI agents hold their own API keys, we are building an economy of software buyers\n"
+        "Model collapse is a slow tax on originality\n"
+        "Sure, one more:"
+    )
+    engine = TopicEngine(voices=FakeVoices(lambda v, p: proposed), settings=_settings(tmp_path))
+
+    topics = engine.propose_topics(3)
+
+    assert not any(t.lower().startswith("here are") for t in topics)
+    assert not any(t.endswith(":") for t in topics)
+    assert any("AI agents" in t for t in topics)
+
+
 def test_pick_topic_falls_back_when_all_proposed_are_excluded(tmp_path: Path) -> None:
     # Arrange: EVERY proposed topic trips the guardrail → nothing usable.
     def responder(voice: str, prompt: str) -> str:

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import re
 from pathlib import Path
 
 from vision.config import Settings, get_settings
@@ -37,10 +39,38 @@ logger = logging.getLogger(__name__)
 _PROPOSE_PROMPT_TEMPLATE = (
     "You are the programming committee of a public thought community that thinks "
     "out loud. Propose {n} NOVEL, thought-provoking discussion topics — each a "
-    "single sharp sentence — spanning ANY domain: technology, ethics, healthcare, "
-    "leadership, culture, everyday life, even humour. Avoid clichés and anything "
-    "already over-discussed. Output ONE topic per line, no numbering, no extra prose."
+    "single sharp sentence. For THIS round, focus the topics on: {domain}. Stay "
+    "concrete, current, and specific (not vague philosophy); avoid clichés and "
+    "over-discussed angles. Output ONE topic per line, no numbering, no extra prose."
 )
+
+# The owner's positioning is a TECH-LEANING cross-domain generalist (2026-07-08):
+# ~60% of rounds steer toward technology/AI/building, ~40% toward the human /
+# cross-domain range. One domain is drawn per proposal round; the weighting is the
+# repetition below. This is the deliberate counterweight to the models' natural
+# drift into abstract philosophy — without it every post trends humanities-essay.
+_DOMAINS: tuple[str, ...] = (
+    # Tech-leaning (~60%) — the builder/technologist lens, explored with a wide mind.
+    "artificial intelligence: where it is really heading and what it quietly changes",
+    "software engineering and systems design — the craft and the hard truths of building",
+    "product and design decisions that reveal something deeper about people",
+    "data, algorithms, and what our tools are actually optimizing for",
+    "the economics, incentives, and power dynamics of technology and AI",
+    "the frontier of AI/tech and its second- and third-order effects",
+    # Human / cross-domain (~40%).
+    "human behavior — how we actually think, decide, and connect",
+    "healthcare, care, and the reality of operating systems people depend on",
+    "a lighter, funnier, or more surprising everyday observation",
+    "culture and society, and how technology is quietly reshaping them",
+)
+
+
+_PREAMBLE_RE = re.compile(r"^(here (are|is)|topics?\b|sure|okay|below are)\b", re.IGNORECASE)
+
+
+def _looks_like_preamble(line: str) -> bool:
+    """True for a meta-scaffolding line the model leaked instead of a topic."""
+    return bool(_PREAMBLE_RE.match(line.strip()))
 
 
 def _is_excluded(topic: str, exclusions: list[str]) -> bool:
@@ -100,7 +130,9 @@ class TopicEngine:
             # A non-positive request is a caller bug; degrade to a single topic
             # rather than sending a nonsensical prompt.
             n = 1
-        prompt = _PROPOSE_PROMPT_TEMPLATE.format(n=n)
+        # Draw a domain for this round (weighted ~60% tech via _DOMAINS repetition)
+        # so topics rotate across the owner's tech-leaning cross-domain range.
+        prompt = _PROPOSE_PROMPT_TEMPLATE.format(n=n, domain=random.choice(_DOMAINS))
         raw = self._voices.ask(CLAUDE, prompt)
         # One topic per non-empty line; strip stray numbering/bullets defensively.
         candidates = [
@@ -108,7 +140,14 @@ class TopicEngine:
             for line in raw.splitlines()
             if line.strip()
         ]
-        candidates = [c for c in candidates if c]
+        # Drop a leaked preamble line ("Here are 3 topics for this round:") that the
+        # model sometimes prepends despite the "no extra prose" instruction — a line
+        # that is meta-scaffolding, not a topic (ends with a colon or announces a list).
+        candidates = [
+            c
+            for c in candidates
+            if c and not (c.endswith(":") or _looks_like_preamble(c))
+        ]
         filtered = _filter_exclusions(candidates, self.exclusions)
         if not filtered:
             logger.warning("Council proposed no usable topics after exclusion filtering.")
