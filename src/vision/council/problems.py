@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 # A separator line of at least three dashes/equals/underscores between problems.
 _DELIMITER = re.compile(r"^\s*[-=_]{3,}\s*$", re.MULTILINE)
+# HTML comments carry the inbox's usage header; stripped before splitting so a
+# problem written directly under the header is never swallowed into it.
+_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 class ProblemQueue:
@@ -46,13 +49,10 @@ class ProblemQueue:
         except OSError as exc:
             logger.warning("problem queue unreadable (%s); treating as empty.", exc.__class__.__name__)
             return []
-        # Skip an HTML-comment block so the inbox file can carry a usage header
-        # that is never mistaken for a problem.
-        return [
-            block.strip()
-            for block in _DELIMITER.split(text)
-            if block.strip() and not block.strip().startswith("<!--")
-        ]
+        # Strip the usage-header HTML comment first (wherever it sits) so it is
+        # never mistaken for a problem nor swallows a problem written under it.
+        text = _COMMENT.sub("", text)
+        return [block.strip() for block in _DELIMITER.split(text) if block.strip()]
 
     def peek(self) -> str | None:
         """Return the next problem blob WITHOUT consuming it, or None."""
