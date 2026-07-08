@@ -46,7 +46,8 @@ from typing import Any, Protocol
 from vision.brahmastra.errors import ImageGenerationError
 from vision.brahmastra.image_client import BrahmastraImageClient
 from vision.config import Settings, get_settings
-from vision.visuals.card_renderer import render_quote_card
+from vision.council.compose import ContrastSpec
+from vision.visuals.card_renderer import render_contrast_card, render_quote_card
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ logger = logging.getLogger(__name__)
 IMAGE_TYPE_NONE = "none"
 IMAGE_TYPE_QUOTE_CARD = "quote_card"
 IMAGE_TYPE_CONCEPT = "concept_illustration"
+IMAGE_TYPE_CONTRAST = "contrast_card"
 
 # Provenance stamped on a deterministically-rendered card (mirrors the news lane's
 # ``image_source = 'deterministic'`` so downstream provenance reads consistently).
@@ -136,6 +138,8 @@ class CouncilImageChoice:
     image_type: str
     quote_line: str | None = None
     illustration_prompt: str | None = None
+    # Populated only for IMAGE_TYPE_CONTRAST — the two labels + text-free scenes.
+    contrast: "ContrastSpec | None" = None
 
     @classmethod
     def none(cls) -> "CouncilImageChoice":
@@ -301,6 +305,7 @@ def _concept_prompt_from(post_text: str) -> str:
 def decide_council_image(
     post_text: str,
     *,
+    contrast: ContrastSpec | None = None,
     settings: Settings | None = None,
 ) -> CouncilImageChoice:
     """Decide the council draft's image outcome AFTER compose (BRD §13.6).
@@ -355,8 +360,11 @@ def decide_council_image(
         )
         return CouncilImageChoice.none()
 
-    # Rule 3: content heuristic. A strong punchline → deterministic quote card;
-    # otherwise an atmospheric, text-free concept illustration.
+    # Rule 3: content heuristic.
+    # A genuine two-sided contrast → the anime contrast card (owner favourite).
+    if contrast is not None:
+        return CouncilImageChoice(image_type=IMAGE_TYPE_CONTRAST, contrast=contrast)
+    # A strong punchline → deterministic quote card; otherwise a concept illustration.
     line = _first_line(body)
     if _is_strong_punchline(line):
         return CouncilImageChoice(image_type=IMAGE_TYPE_QUOTE_CARD, quote_line=line)
@@ -436,7 +444,9 @@ def attach_council_image(
     now = now or datetime.now(timezone.utc)
 
     post_text = str(draft.get("post_text") or "")
-    choice = decide_council_image(post_text, settings=settings)
+    contrast = draft.get("contrast")
+    contrast = contrast if isinstance(contrast, ContrastSpec) else None
+    choice = decide_council_image(post_text, contrast=contrast, settings=settings)
 
     if choice.image_type == IMAGE_TYPE_NONE:
         _set_none(draft)
@@ -495,7 +505,35 @@ def _generate(
         return _render_quote_card_safe(choice.quote_line or "", settings, render_quote_card)
     if choice.image_type == IMAGE_TYPE_CONCEPT:
         return _illustrate_safe(choice.illustration_prompt or "", settings, image_client)
+    if choice.image_type == IMAGE_TYPE_CONTRAST and choice.contrast is not None:
+        return _render_contrast_safe(choice.contrast, settings, image_client)
     return None
+
+
+def _render_contrast_safe(
+    contrast: ContrastSpec,
+    settings: Settings,
+    image_client: _ImageClient | None,
+) -> bytes | None:
+    """Generate BOTH anime panels + composite a contrast card, or ``None`` on failure.
+
+    Both panels must render (a one-panel comparison is meaningless); ANY agy or
+    layout failure degrades to text-only so the image never blocks the post (§13.6).
+    """
+    client = image_client or BrahmastraImageClient(settings)
+    try:
+        left = client.illustrate(contrast.left_scene)
+        right = client.illustrate(contrast.right_scene)
+    except ImageGenerationError as exc:
+        logger.warning("Council contrast-card panel failed; degrading to text-only: %s", exc)
+        return None
+    try:
+        return render_contrast_card(
+            left, right, contrast.left_label, contrast.right_label, settings=settings
+        )
+    except (ValueError, OSError) as exc:
+        logger.warning("Council contrast-card composite failed; degrading to text-only: %s", exc)
+        return None
 
 
 def _render_quote_card_safe(
@@ -583,8 +621,16 @@ def _stamp_draft(
     draft["image_type"] = choice.image_type
     draft["image_path"] = str(out_path)
     if choice.image_type == IMAGE_TYPE_QUOTE_CARD:
+        # A quote card is deterministic (label composited over solid brand colour);
+        # a contrast card mixes agy panels with deterministic labels, but its TEXT
+        # is deterministic too, so both record as deterministic provenance.
         draft["image_source"] = _SOURCE_DETERMINISTIC
         draft["image_prompt"] = None
+    elif choice.image_type == IMAGE_TYPE_CONTRAST and choice.contrast is not None:
+        draft["image_source"] = settings.image_model
+        draft["image_prompt"] = (
+            f"LEFT: {choice.contrast.left_scene} | RIGHT: {choice.contrast.right_scene}"
+        )
     else:  # IMAGE_TYPE_CONCEPT
         draft["image_source"] = settings.image_model
         draft["image_prompt"] = choice.illustration_prompt

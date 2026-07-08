@@ -21,12 +21,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import io
+
+from PIL import Image
+
 from vision.brahmastra.errors import ImageGenerationError
 from vision.config import Settings
+from vision.council.compose import ContrastSpec
 from vision.council.visual import (
+    IMAGE_TYPE_CONTRAST,
     CouncilImageChoice,
     attach_council_image,
     decide_council_image,
+)
+
+
+def _real_png(color: tuple[int, int, int] = (40, 80, 120)) -> bytes:
+    """A valid PNG so the contrast compositor can actually open the panel."""
+    buf = io.BytesIO()
+    Image.new("RGB", (300, 400), color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+_CONTRAST = ContrastSpec(
+    left_label="AI FIRST",
+    left_scene="a fancy house on stilts over a chasm",
+    right_label="FOUNDATIONS FIRST",
+    right_scene="a cottage on solid bedrock",
 )
 
 
@@ -88,6 +109,38 @@ class _FakeImageClient:
 
 
 _PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake-card-bytes"
+
+
+def test_decide_prefers_contrast_card_when_spec_present(tmp_path: Path) -> None:
+    # A genuine two-sided contrast beats quote/concept — the owner-favourite format.
+    choice = decide_council_image(_PUNCHY_POST, contrast=_CONTRAST, settings=_settings(tmp_path))
+    assert choice.image_type == IMAGE_TYPE_CONTRAST
+    assert choice.contrast == _CONTRAST
+
+
+def test_attach_generates_and_stamps_a_contrast_card(tmp_path: Path) -> None:
+    # Two valid panels from agy -> composited contrast card written + stamped.
+    client = _FakeImageClient(_real_png())
+    draft: dict[str, object] = {"id": "abc123", "post_text": _PUNCHY_POST, "contrast": _CONTRAST}
+
+    attach_council_image(
+        draft, settings=_settings(tmp_path), image_client=client
+    )
+
+    assert draft["image_type"] == IMAGE_TYPE_CONTRAST
+    assert draft["image_path"] and Path(str(draft["image_path"])).exists()
+    # Both panels were requested (a one-panel comparison is meaningless).
+    assert len(client.calls) == 2
+
+
+def test_attach_contrast_degrades_to_text_only_when_a_panel_fails(tmp_path: Path) -> None:
+    client = _FakeImageClient(ImageGenerationError("agy down"))
+    draft: dict[str, object] = {"id": "x", "post_text": _PUNCHY_POST, "contrast": _CONTRAST}
+
+    attach_council_image(draft, settings=_settings(tmp_path), image_client=client)
+
+    assert draft["image_type"] == "none"  # never blocks the post
+    assert draft.get("image_path") is None
 
 
 # --- 1. Decision: punchy post → quote_card ---------------------------------

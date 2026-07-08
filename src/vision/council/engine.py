@@ -142,6 +142,7 @@ def run_council(
         "post_text": composed.post_text,
         "hashtags": composed.hashtags,
         "council_block": composed.council_block,
+        "contrast": composed.contrast,  # optional; drives the contrast-card image lane
         "transcript": _build_transcript(deliberation),
         "model_trace": model_trace,
     }

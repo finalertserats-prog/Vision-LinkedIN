@@ -168,6 +168,21 @@ def _strip_leading_preamble(post_text: str) -> str:
     return "\n".join(lines).strip()
 
 
+@dataclass(frozen=True)
+class ContrastSpec:
+    """A two-sided contrast for a contrast-card image (optional, §13.6 + owner req).
+
+    Present ONLY when the post rests on a clear this-vs-that / naive-vs-wise
+    metaphor. The two scenes are TEXT-FREE anime prompts (agy draws them); the
+    short ALL-CAPS labels are composited crisply over each panel.
+    """
+
+    left_label: str  # 1-3 words, the flawed/naive side
+    left_scene: str  # text-free anime scene for the left panel
+    right_label: str  # 1-3 words, the wiser side
+    right_scene: str  # text-free anime scene for the right panel
+
+
 @dataclass
 class ComposedPost:
     """The structured, de-named result of the compose step.
@@ -181,6 +196,7 @@ class ComposedPost:
     post_text: str  # the LinkedIn post body (de-named)
     council_block: str  # the unnamed 3-bullet 'Council' block + signature line
     hashtags: list[str] = field(default_factory=list)  # hashtags parsed from the post
+    contrast: ContrastSpec | None = None  # a contrast-card spec, when the post is binary
     raw: str = ""  # the composer's full raw output (for transcript/debug)
 
 
@@ -221,6 +237,33 @@ def contains_forbidden_name(text: str) -> bool:
     return find_forbidden_name(text) is not None
 
 
+def _parse_contrast(value: str) -> ContrastSpec | None:
+    """Parse a 'CONTRAST:' value into a :class:`ContrastSpec`, or None if malformed.
+
+    Expected shape (optional line): ``<LEFT_LABEL> ~ <left scene> || <RIGHT_LABEL>
+    ~ <right scene>``. A missing delimiter / empty part -> None (the post is simply
+    treated as having no contrast card — never an error).
+    """
+    if "||" not in value:
+        return None
+    left_raw, right_raw = value.split("||", 1)
+
+    def _side(side: str) -> tuple[str, str] | None:
+        if "~" not in side:
+            return None
+        label, scene = side.split("~", 1)
+        label, scene = _strip_em_dashes(label.strip()), scene.strip()
+        return (label, scene) if label and scene else None
+
+    left = _side(left_raw)
+    right = _side(right_raw)
+    if left is None or right is None:
+        return None
+    return ContrastSpec(
+        left_label=left[0], left_scene=left[1], right_label=right[0], right_scene=right[1]
+    )
+
+
 def _parse_composition(raw: str) -> ComposedPost:
     """Parse the composer's fixed-shape output into a :class:`ComposedPost`.
 
@@ -246,6 +289,7 @@ def _parse_composition(raw: str) -> ComposedPost:
     situation = ""
     post_lines: list[str] = []
     council_lines: list[str] = []
+    contrast: ContrastSpec | None = None  # optional contrast-card spec
     section: str | None = None  # which multi-line section we're accumulating
 
     for line in raw.splitlines():
@@ -285,6 +329,11 @@ def _parse_composition(raw: str) -> ComposedPost:
                 if value:
                     council_lines.append(value)
                 continue
+            if key == "contrast":
+                # Optional single line; split on the raw value to keep '~' and '||'.
+                contrast = _parse_contrast(norm.split(":", 1)[1])
+                section = None
+                continue
         # Bare heading lines with no colon (e.g. a Markdown '## POST').
         elif low in {"post", "council"}:
             section = "post" if low == "post" else "council"
@@ -311,6 +360,7 @@ def _parse_composition(raw: str) -> ComposedPost:
         post_text=post_text,
         council_block=council_block,
         hashtags=hashtags,
+        contrast=contrast,
         raw=raw,
     )
 
@@ -396,7 +446,15 @@ class Composer:
             "SITUATION: <disagreed|agreed|shifted> - <one line why>\n"
             "POST:\n<the post>\n"
             "COUNCIL:\n- <viewpoint 1>\n- <viewpoint 2>\n- <viewpoint 3>\n"
-            "Powered by Brahmastra"
+            "Powered by Brahmastra\n"
+            "OPTIONAL - only if the post rests on a clear TWO-SIDED contrast (this vs "
+            "that, naive vs wise, before vs after), add ONE more line for a two-panel "
+            "comparison image. LEFT = the flawed/naive side, RIGHT = the wiser side. "
+            "Each side is a 1-3 word ALL-CAPS label plus a TEXT-FREE visual scene "
+            "(describe an image with NO words in it). If the post is not a clear "
+            "binary, OMIT this line entirely:\n"
+            "CONTRAST: <LEFT_LABEL> ~ <left scene, text-free> || <RIGHT_LABEL> ~ "
+            "<right scene, text-free>"
         )
 
     def compose(self, delib: Deliberation) -> ComposedPost:

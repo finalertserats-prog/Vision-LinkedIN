@@ -73,6 +73,30 @@ def test_parse_composition_salvages_markdown_output():
     assert "#Leadership" in parsed.hashtags[0] or "Leadership" in "".join(parsed.hashtags)
 
 
+def test_parse_composition_extracts_optional_contrast():
+    raw = (
+        "FORMAT: show_the_split\nSITUATION: disagreed - speed vs safety\n"
+        "POST:\n" + ("A real post about foundations. " * 12) + "\n"
+        "COUNCIL:\n- a\n- b\n- c\nPowered by Brahmastra\n"
+        "CONTRAST: AI FIRST ~ a fancy house on stilts over a chasm || "
+        "FOUNDATIONS FIRST ~ a cottage on solid bedrock"
+    )
+    parsed = _parse_composition(raw)
+    assert parsed.contrast is not None
+    assert parsed.contrast.left_label == "AI FIRST"
+    assert "stilts" in parsed.contrast.left_scene
+    assert parsed.contrast.right_label == "FOUNDATIONS FIRST"
+    assert "bedrock" in parsed.contrast.right_scene
+
+
+def test_parse_composition_contrast_absent_is_none():
+    raw = (
+        "FORMAT: quiet_observation\nSITUATION: agreed\n"
+        "POST:\n" + ("A plain reflective post with no binary. " * 10) + "\n"
+    )
+    assert _parse_composition(raw).contrast is None
+
+
 def test_parse_composition_strips_leading_preamble():
     # Regression: the model prefixed the body with "Here is the post." (2026-07-08).
     raw = (
