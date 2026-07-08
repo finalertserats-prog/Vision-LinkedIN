@@ -1,0 +1,13 @@
+[Unit]
+Description=Fire VISION council daily at 08:00 IST (primary content generator)
+
+[Timer]
+# 08:00 Asia/Kolkata. Explicit timezone keeps the slot readable in IST while the
+# host clock stays UTC (08:00 IST == 02:30 UTC).
+OnCalendar=*-*-* 08:00:00 Asia/Kolkata
+# Catch up a missed 08:00 (host asleep/down) on next boot so a day is not skipped.
+Persistent=true
+Unit=vision-council.service
+
+[Install]
+WantedBy=timers.target

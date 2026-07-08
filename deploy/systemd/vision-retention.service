@@ -1,0 +1,35 @@
+[Unit]
+# Weekly data lifecycle: archive rows/images older than the window -> Google Drive
+# via rclone -> verify -> prune + VACUUM. Fail-closed: never prunes without a
+# verified off-box backup.
+#
+# IMPORTANT (auth): rclone's config + OAuth token live in $HOME (~/.config/rclone)
+# and must be readable AND writable (token refresh), so this unit uses
+# ProtectSystem=full and does NOT set ProtectHome (same rationale as the council).
+Description=VISION retention (weekly archive -> Drive backup -> prune + VACUUM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-retention
+
+OOMScoreAdjust=-300
+MemoryMax=1G
+MemorySwapMax=0
+# Archiving + a possibly-large Drive upload/verify — give it generous room.
+TimeoutStartSec=3600
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+StandardOutput=append:/opt/vision/logs/vision-retention.log
+StandardError=append:/opt/vision/logs/vision-retention.log
+
+[Install]
+WantedBy=multi-user.target

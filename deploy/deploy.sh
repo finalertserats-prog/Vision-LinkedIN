@@ -18,7 +18,11 @@ BRANCH="${VISION_BRANCH:-main}"
 # The always-on service (restarted every deploy) and the timer units (only need
 # a daemon-reload so the next scheduled tick picks up new unit files/code).
 WEB_SERVICE="vision-web.service"
-TIMERS=(vision-daily.timer vision-publisher.timer vision-expire.timer vision-token.timer vision-canary.timer)
+# vision-council = primary content generator; vision-retention = weekly Drive backup
+# + prune (both added 2026-07-08). vision-daily is the older news-mode lane — leave
+# its timer disabled unless you also want news posts. deploy.sh only *restarts*
+# already-active timers, so listing one the operator hasn't enabled is a safe no-op.
+TIMERS=(vision-council.timer vision-daily.timer vision-publisher.timer vision-expire.timer vision-retention.timer vision-token.timer vision-canary.timer)
 
 echo "=== VISION deploy: pulling ${BRANCH} in ${VISION_HOME} ==="
 git -C "${VISION_HOME}" pull --ff-only origin "${BRANCH}"

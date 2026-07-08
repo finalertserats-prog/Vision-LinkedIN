@@ -23,11 +23,20 @@ MAILTO=vishnu.wildeagle@gmail.com
 # Absolute PATH so the venv binaries and pg_dump resolve under cron's minimal env.
 PATH=/opt/vision/venv/bin:/usr/local/bin:/usr/bin:/bin
 
-# 06:30 IST (01:00 UTC) — daily pipeline: ingest→curate→synthesise→email draft.
-30 6 * * *   /opt/vision/venv/bin/vision-daily        >> /opt/vision/logs/vision-daily.log 2>&1
+# 08:00 IST (02:30 UTC) — PRIMARY content: council deliberation -> natural post +
+# anime image -> approval email. (vision-daily below is the older news-mode lane;
+# enable only ONE content generator unless you want both a council and a news post.)
+0 8 * * *    /opt/vision/venv/bin/vision-council      >> /opt/vision/logs/vision-council.log 2>&1
+
+# 06:30 IST (01:00 UTC) — OLDER news-mode daily pipeline (disabled by default:
+# leave this line commented unless you also want news posts alongside the council).
+# 30 6 * * *   /opt/vision/venv/bin/vision-daily        >> /opt/vision/logs/vision-daily.log 2>&1
 
 # Every 5 minutes — publisher: publish approved-and-due drafts + confirmation.
 */5 * * * *  /opt/vision/venv/bin/vision-publisher    >> /opt/vision/logs/vision-publisher.log 2>&1
+
+# Sunday 03:30 IST (Sat 22:00 UTC) — retention: archive >30d -> Drive (rclone) -> prune.
+30 3 * * 0   /opt/vision/venv/bin/vision-retention    >> /opt/vision/logs/vision-retention.log 2>&1
 
 # 20:00 IST (14:30 UTC) — expire any un-actioned draft (fail-closed: no post).
 0 20 * * *   /opt/vision/venv/bin/vision-expire       >> /opt/vision/logs/vision-expire.log 2>&1

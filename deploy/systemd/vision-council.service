@@ -1,0 +1,38 @@
+[Unit]
+# Daily council content: 3-AI deliberation -> natural-voice post + anime image ->
+# approval email. This is the PRIMARY content generator.
+#
+# IMPORTANT (auth): it shells out to the Brahmastra CLIs (agy/codex/claude), which
+# read AND refresh their OAuth tokens in $HOME (~/.claude, ~/.gemini, ~/.codex).
+# So this unit uses ProtectSystem=full (system dirs read-only, /opt + $HOME stay
+# WRITABLE) and does NOT set ProtectHome — ProtectSystem=strict or ProtectHome=true
+# would break token refresh and silently kill the generation lane.
+Description=VISION council (daily deliberated post + anime image + approval email)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-council
+
+# Heaviest job: three LLM CLIs plus agy image generation (a child process whose
+# memory counts against this cgroup). Bounded so it cannot swamp the web tier.
+OOMScoreAdjust=-500
+MemoryMax=1536M
+MemorySwapMax=0
+# Deliberation (~4 min) + agy image (up to 2x300s) + compose retries -> allow 30 min.
+TimeoutStartSec=1800
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+StandardOutput=append:/opt/vision/logs/vision-council.log
+StandardError=append:/opt/vision/logs/vision-council.log
+
+[Install]
+WantedBy=multi-user.target

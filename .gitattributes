@@ -1,0 +1,10 @@
+# Force LF for files that run on the Linux VPS — CRLF (from Windows dev) breaks
+# shell scripts ("bad interpreter: /usr/bin/env bash^M") and systemd units.
+*.sh            text eol=lf
+deploy/systemd/* text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+# Python + config stay LF too for consistency across the repo.
+*.py            text eol=lf
+*.toml          text eol=lf
+*.md            text eol=lf

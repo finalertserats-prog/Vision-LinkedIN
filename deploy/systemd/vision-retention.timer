@@ -1,0 +1,12 @@
+[Unit]
+Description=Fire VISION retention weekly on Sunday at 03:30 IST (off-hours)
+
+[Timer]
+# Sunday 03:30 Asia/Kolkata — low-traffic window (VACUUM takes a brief lock).
+OnCalendar=Sun *-*-* 03:30:00 Asia/Kolkata
+# Catch up a missed weekly run on next boot so backups don't silently lapse.
+Persistent=true
+Unit=vision-retention.service
+
+[Install]
+WantedBy=timers.target
