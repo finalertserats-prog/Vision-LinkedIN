@@ -29,6 +29,19 @@ def test_peek_and_consume_are_fifo_and_rewrite_the_file(tmp_path: Path) -> None:
     assert q.peek().startswith("Problem two")
 
 
+def test_html_comment_header_is_ignored(tmp_path: Path) -> None:
+    # The self-documenting usage header must never be mistaken for a problem.
+    f = tmp_path / "problems.md"
+    f.write_text(
+        "<!--\nUsage: brain-dump a problem below, --- separated.\n-->\n\n"
+        "The real problem: agy timed out under load.\n",
+        encoding="utf-8",
+    )
+    q = _queue(f)
+    head = q.consume_head()
+    assert head is not None and head.startswith("The real problem")
+
+
 def test_empty_or_missing_inbox_returns_none(tmp_path: Path) -> None:
     q = _queue(tmp_path / "does_not_exist.md")
     assert q.peek() is None

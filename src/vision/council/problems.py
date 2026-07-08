@@ -46,7 +46,13 @@ class ProblemQueue:
         except OSError as exc:
             logger.warning("problem queue unreadable (%s); treating as empty.", exc.__class__.__name__)
             return []
-        return [block.strip() for block in _DELIMITER.split(text) if block.strip()]
+        # Skip an HTML-comment block so the inbox file can carry a usage header
+        # that is never mistaken for a problem.
+        return [
+            block.strip()
+            for block in _DELIMITER.split(text)
+            if block.strip() and not block.strip().startswith("<!--")
+        ]
 
     def peek(self) -> str | None:
         """Return the next problem blob WITHOUT consuming it, or None."""
