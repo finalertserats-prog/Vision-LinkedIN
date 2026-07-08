@@ -238,6 +238,17 @@ class Settings(BaseSettings):
     rclone_remote: str = Field(default="", alias="RCLONE_REMOTE")
     rclone_drive_path: str = Field(default="VISION/backups", alias="RCLONE_DRIVE_PATH")
 
+    # --- Video lane (Phase 5 — anime Insight Reels) -----------------------
+    # Opt-in, never forced daily. No API key: agy stills + edge-tts voice +
+    # imageio-ffmpeg's bundled binary. Veo B-roll is a later opt-in phase.
+    video_enabled: bool = Field(default=False, alias="VIDEO_ENABLED")
+    video_voice: str = Field(default="en-US-AndrewNeural", alias="VIDEO_VOICE")
+    video_width: int = Field(default=1080, ge=16, alias="VIDEO_WIDTH")
+    video_height: int = Field(default=1920, ge=16, alias="VIDEO_HEIGHT")
+    video_fps: int = Field(default=30, ge=1, le=60, alias="VIDEO_FPS")
+    video_work_dir: str = Field(default="prep/reels", alias="VIDEO_WORK_DIR")
+    video_music_dir: str = Field(default="assets/music", alias="VIDEO_MUSIC_DIR")
+
     # --- Author / signature (§15.6, D9) -----------------------------------
     post_signature_mode: SignatureMode = Field(
         default=SignatureMode.CARD_WATERMARK, alias="POST_SIGNATURE_MODE"

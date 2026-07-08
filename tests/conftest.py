@@ -24,6 +24,17 @@ from vision.db import models  # noqa: F401
 from vision.db.models import Item, Run, Source
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register custom markers so ``@pytest.mark.integration`` isn't a warning.
+
+    ``integration`` flags the tests that spawn the real bundled ffmpeg (the video
+    assembly render), so they can be selected/deselected without editing pyproject.
+    """
+    config.addinivalue_line(
+        "markers", "integration: real end-to-end render (spawns the bundled ffmpeg)"
+    )
+
+
 @pytest.fixture
 def db_session() -> Iterator[Session]:
     """Yield a fresh in-memory SQLite session with the full schema created.

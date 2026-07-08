@@ -44,6 +44,8 @@ dependencies = [
     "tenacity>=8.2",            # retry/backoff for transient feed/LLM/LinkedIn failures (NFR-07)
     "pillow>=10.0",             # deterministic stat/quote card rendering (§13.6 visuals lane)
     "matplotlib>=3.8",          # deterministic bar/line charts, headless Agg (§13.6 / D10)
+    "edge-tts>=6.1",            # FREE headless TTS voice-over, no API key (§23 video lane 5b)
+    "imageio-ffmpeg>=0.5",      # bundled ffmpeg binary for reel assembly, no system install
 ]
 
 [project.optional-dependencies]
