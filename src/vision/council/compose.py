@@ -211,6 +211,72 @@ class ContrastSpec:
     right_scene: str  # text-free anime scene for the right panel
 
 
+@dataclass(frozen=True)
+class DiagramSpec:
+    """A deterministic mermaid diagram for a technical post (optional, owner req 2026-07-11).
+
+    Present ONLY when the post is genuinely TECHNICAL and a small picture of how
+    something is built, flows, or is changed by AI would AMPLIFY the idea. The
+    ``mermaid`` source is rendered DETERMINISTICALLY by the mermaid CLI (text
+    labels are fine - precision rule §13.6/D10, the same basis as the
+    deterministic cards), NEVER by diffusion. This is the tech lane's amplifying
+    image: it carries a piece of the argument the words cannot, and it is exempt
+    from the anime/text-free rule because it is an information graphic, not art.
+    """
+
+    mermaid: str  # the mermaid diagram source (deterministically rendered to PNG)
+
+
+# The mermaid diagram-type keywords a DIAGRAM section must OPEN with to be treated
+# as a real diagram (else it is noise the model emitted and we drop it). Matched
+# against the first non-blank token, lower-cased, so 'flowchart TD' / 'graph LR' /
+# 'sequenceDiagram' all qualify. A startswith check covers versioned variants
+# ('stateDiagram-v2').
+_MERMAID_HEADERS: tuple[str, ...] = (
+    "flowchart",
+    "graph",
+    "sequencediagram",
+    "classdiagram",
+    "statediagram",
+    "erdiagram",
+    "journey",
+    "mindmap",
+    "timeline",
+)
+
+# A leading/trailing Markdown code fence (```mermaid ... ```) the compose model
+# sometimes wraps the diagram in despite being asked for raw source. Stripped so
+# the fence never reaches mmdc (which would fail to parse it).
+_FENCE_OPEN_RE = re.compile(r"^```[A-Za-z]*[ \t]*\n?")
+_FENCE_CLOSE_RE = re.compile(r"\n?```[ \t]*$")
+
+
+def _strip_code_fence(text: str) -> str:
+    """Remove a wrapping ```mermaid ... ``` code fence from ``text`` if present."""
+    t = text.strip()
+    if not t.startswith("```"):
+        return t
+    return _FENCE_CLOSE_RE.sub("", _FENCE_OPEN_RE.sub("", t)).strip()
+
+
+def _parse_diagram(diagram_lines: list[str]) -> DiagramSpec | None:
+    """Parse accumulated DIAGRAM lines into a :class:`DiagramSpec`, or None.
+
+    Strips a stray code fence, then requires the source to OPEN with a known
+    mermaid diagram keyword (:data:`_MERMAID_HEADERS`). Anything else - an empty
+    section, prose the model wrote by mistake, an unknown diagram type - returns
+    None so the post is simply published without a diagram (never an error).
+    """
+    src = _strip_code_fence("\n".join(diagram_lines).strip())
+    if not src:
+        return None
+    first = next((ln.strip() for ln in src.splitlines() if ln.strip()), "")
+    opener = first.lower().split(maxsplit=1)[0] if first else ""
+    if not any(opener == h or opener.startswith(h) for h in _MERMAID_HEADERS):
+        return None
+    return DiagramSpec(mermaid=src)
+
+
 @dataclass
 class ComposedPost:
     """The structured, de-named result of the compose step.
@@ -225,6 +291,7 @@ class ComposedPost:
     council_block: str  # the unnamed 3-bullet 'Council' block + signature line
     hashtags: list[str] = field(default_factory=list)  # hashtags parsed from the post
     contrast: ContrastSpec | None = None  # a contrast-card spec, when the post is binary
+    diagram: DiagramSpec | None = None  # a mermaid diagram, when the post is technical
     raw: str = ""  # the composer's full raw output (for transcript/debug)
 
 
@@ -317,6 +384,7 @@ def _parse_composition(raw: str) -> ComposedPost:
     situation = ""
     post_lines: list[str] = []
     council_lines: list[str] = []
+    diagram_lines: list[str] = []  # optional multi-line mermaid diagram section
     contrast: ContrastSpec | None = None  # optional contrast-card spec
     section: str | None = None  # which multi-line section we're accumulating
 
@@ -362,6 +430,13 @@ def _parse_composition(raw: str) -> ComposedPost:
                 contrast = _parse_contrast(norm.split(":", 1)[1])
                 section = None
                 continue
+            if key == "diagram":
+                # Multi-line mermaid section (like POST/COUNCIL): accumulate the
+                # ORIGINAL lines that follow so indentation/arrows survive intact.
+                section = "diagram"
+                if value:
+                    diagram_lines.append(value)
+                continue
         # Bare heading lines with no colon (e.g. a Markdown '## POST').
         elif low in {"post", "council"}:
             section = "post" if low == "post" else "council"
@@ -378,12 +453,15 @@ def _parse_composition(raw: str) -> ComposedPost:
             post_lines.append(line)
         elif section == "council":
             council_lines.append(line)
+        elif section == "diagram":
+            diagram_lines.append(line)
 
     post_text = _strip_em_dashes(
         _strip_trailing_outro(_strip_leading_preamble("\n".join(post_lines).strip()))
     )
     council_block = _strip_em_dashes("\n".join(council_lines).strip())
     hashtags = _HASHTAG_RE.findall(post_text)
+    diagram = _parse_diagram(diagram_lines)
     return ComposedPost(
         format=fmt,
         situation=situation,
@@ -391,6 +469,7 @@ def _parse_composition(raw: str) -> ComposedPost:
         council_block=council_block,
         hashtags=hashtags,
         contrast=contrast,
+        diagram=diagram,
         raw=raw,
     )
 
@@ -458,12 +537,19 @@ class Composer:
             "let the IDEA carry it with NO personal anchor at all. A personal detail is earned "
             "only when it genuinely sharpens the point, never a reflex. For THIS post, lean "
             f"toward this way in: {random.choice(_LENSES)}, but the idea always comes first.\n"
-            "- TECH TOPICS STAY GROUNDED: if the topic is technical (AI, engineering, "
-            "product, data, systems), keep it concrete and specific about how things "
-            "actually work, get built, or fail — a technologist's real insight connected to "
-            "a bigger idea, NOT abstract philosophy dressed up as tech. The owner is a "
-            "tech-leaning cross-domain thinker; sound like someone who builds AND thinks "
-            "widely, never like an armchair essayist.\n"
+            "- TECH IS THE SPINE, NOT THE GARNISH: the owner is a technologist first. "
+            "Most posts should show a CONCRETE mechanism - how something actually works, "
+            "gets built, breaks, or is being changed by AI - not philosophy with a tech "
+            "word sprinkled on top. When AI is in play, be specific about WHAT is changing "
+            "and HOW (the real shift in how we build, decide, diagnose, or work), never a "
+            "vague 'AI will transform everything'. Name the concrete thing. Sound like "
+            "someone who builds AND thinks widely, never like an armchair essayist.\n"
+            "- LAND ON A LEVER, NOT A SIGH: every post must arrive at something the reader "
+            "can DO or grasp concretely - a mechanism, a trade-off, a specific move, or how "
+            "to OVERCOME the problem it raises. Never end on pure abstraction or a pretty "
+            "resignation. If the post names a hard problem, it must gesture at the way "
+            "through it: what to build, what to change, what to try. The reader should "
+            "leave with a lever, not just a mood.\n"
             "- NO EM-DASHES (owner rule, important): do NOT use em-dashes (the long dash) "
             "anywhere in the post. Overusing them is a well-known tell that an AI wrote the "
             "text and it reads as inauthentic. Use a plain hyphen, a comma, a colon, "
@@ -501,7 +587,18 @@ class Composer:
             "(describe an image with NO words in it). If the post is not a clear "
             "binary, OMIT this line entirely:\n"
             "CONTRAST: <LEFT_LABEL> ~ <left scene, text-free> || <RIGHT_LABEL> ~ "
-            "<right scene, text-free>"
+            "<right scene, text-free>\n"
+            "OPTIONAL - only if the post is genuinely TECHNICAL and a small picture "
+            "of how something is built, flows, or is changed by AI would AMPLIFY it "
+            "(carry a piece of the argument the words cannot), add a compact mermaid "
+            "diagram as the VERY LAST thing. Keep it small (max ~7 nodes), labels "
+            "short and plain, NO AI/model/vendor names, NO front-matter or config "
+            "block, NO '---' lines - just a plain 'flowchart TD' (or "
+            "'sequenceDiagram'). Emit it as RAW mermaid (no code fences) under a "
+            "DIAGRAM: header. Use at most ONE of CONTRAST or DIAGRAM; prefer DIAGRAM "
+            "for a technical post. If the post is not technical or a diagram would "
+            "add no real information, OMIT this entirely:\n"
+            "DIAGRAM:\nflowchart TD\n  A[...] --> B[...]"
         )
 
     def _build_problem_prompt(self, delib: Deliberation, problem: str) -> str:
@@ -635,6 +732,19 @@ class Composer:
                         extra={"forbidden_match": card_leak},
                     )
                     composed.contrast = None
+
+            # The diagram's mermaid labels also get RENDERED INTO the published
+            # image, so they need the same de-naming guard. A leak DROPS the
+            # diagram (keep the good post, lose the risky image) rather than
+            # failing the whole compose - mirrors the contrast-card rule above.
+            if composed.diagram is not None:
+                diagram_leak = find_forbidden_name(composed.diagram.mermaid)
+                if diagram_leak is not None:
+                    logger.warning(
+                        "Diagram names a forbidden AI/model; dropping the diagram.",
+                        extra={"forbidden_match": diagram_leak},
+                    )
+                    composed.diagram = None
 
             # Parse-miss guard — a missing/tiny POST body means the editor didn't emit
             # a usable post; retry rather than return an empty draft (silent failure).

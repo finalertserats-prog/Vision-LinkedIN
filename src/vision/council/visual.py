@@ -46,8 +46,9 @@ from typing import Any, Protocol
 from vision.brahmastra.errors import ImageGenerationError
 from vision.brahmastra.image_client import BrahmastraImageClient
 from vision.config import Settings, get_settings
-from vision.council.compose import ContrastSpec
+from vision.council.compose import ContrastSpec, DiagramSpec
 from vision.visuals.card_renderer import render_contrast_card, render_quote_card
+from vision.visuals.diagram_renderer import DiagramRenderError, render_mermaid
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,11 @@ IMAGE_TYPE_NONE = "none"
 IMAGE_TYPE_QUOTE_CARD = "quote_card"
 IMAGE_TYPE_CONCEPT = "concept_illustration"
 IMAGE_TYPE_CONTRAST = "contrast_card"
+# The tech lane: a genuinely technical post gets a DETERMINISTIC mermaid diagram
+# that amplifies its idea (rendered by the mermaid CLI, so text labels are safe -
+# precision rule §13.6/D10). Exempt from the anime/text-free rule because it is an
+# information graphic, not decorative art.
+IMAGE_TYPE_DIAGRAM = "diagram"
 
 # Provenance stamped on a deterministically-rendered card (mirrors the news lane's
 # ``image_source = 'deterministic'`` so downstream provenance reads consistently).
@@ -90,11 +96,19 @@ _HASHTAG_OR_MENTION_RE = re.compile(r"[#@]\w")
 # The text-free concept-illustration prompt template. WHY the negatives live here
 # too (the image client also appends them): the council prompt must be SELF-
 # EVIDENTLY safe when logged/inspected, and belt-and-braces guarantees the
-# precision rule (§13.6/D10) regardless of client internals. The atmospheric
-# concept is derived from the post's opening so the art stays on-theme.
+# precision rule (§13.6/D10) regardless of client internals. The concept is
+# derived from the post's opening so the art stays on-theme.
+#
+# AMPLIFY, DON'T DECORATE (owner req 2026-07-11): the earlier template only
+# "evoked the mood" — pretty but inert, carrying none of the post's argument.
+# The image must now VISUALLY AMPLIFY the post's core idea: depict the central
+# tension / mechanism / turning point as a single strong visual metaphor the
+# viewer grasps at a glance, still hand-drawn anime and strictly text-free.
 _CONCEPT_PROMPT_TEMPLATE = (
-    "An abstract, atmospheric concept illustration evoking the mood of this "
-    "reflection: {concept}. Muted, professional, contemplative. "
+    "A hand-drawn anime-style illustration that VISUALLY AMPLIFIES the core idea "
+    "of this reflection - depict its central tension, mechanism, or turning point "
+    "as a single strong visual metaphor a viewer grasps at a glance, not a vague "
+    "mood: {concept}. Purposeful and editorial, emotive, refined linework. "
     "Strictly no text, no words, no letters, no numbers, no logos."
 )
 # Cap on how much of the post seeds the concept prompt — enough for theme, not so
@@ -124,6 +138,17 @@ class _ImageClient(Protocol):
     def illustrate(self, prompt: str, model: str | None = None) -> bytes: ...  # pragma: no cover
 
 
+class _DiagramRenderer(Protocol):
+    """The ``render_mermaid`` call shape the lane depends on (injected/mocked).
+
+    Declaring the seam as a Protocol lets tests pass a stub that never shells out
+    to ``mmdc`` (no subprocess, no headless browser) and documents the contract:
+    mermaid source in, PNG bytes out.
+    """
+
+    def __call__(self, mermaid: str, settings: Any = ...) -> bytes: ...  # pragma: no cover
+
+
 @dataclass(frozen=True)
 class CouncilImageChoice:
     """The council image DECISION — an inert value object the caller acts on.
@@ -140,6 +165,8 @@ class CouncilImageChoice:
     illustration_prompt: str | None = None
     # Populated only for IMAGE_TYPE_CONTRAST — the two labels + text-free scenes.
     contrast: "ContrastSpec | None" = None
+    # Populated only for IMAGE_TYPE_DIAGRAM — the mermaid source (deterministic).
+    diagram: "DiagramSpec | None" = None
 
     @classmethod
     def none(cls) -> "CouncilImageChoice":
@@ -306,6 +333,7 @@ def decide_council_image(
     post_text: str,
     *,
     contrast: ContrastSpec | None = None,
+    diagram: DiagramSpec | None = None,
     settings: Settings | None = None,
 ) -> CouncilImageChoice:
     """Decide the council draft's image outcome AFTER compose (BRD §13.6).
@@ -347,6 +375,14 @@ def decide_council_image(
         # Nothing to base a visual on — text-only (defensive; compose fails closed
         # on empty, but the lane must never assume that upstream).
         return CouncilImageChoice.none()
+
+    # Rule 1.5: the DIAGRAM lane. A technical post's diagram is CONTENT (it
+    # amplifies the idea), not decorative seasoning, so it bypasses the every-N
+    # rotation below - when a post genuinely warrants a diagram we show it. It is
+    # still bounded by the weekly cap (enforced in attach_council_image) and needs
+    # its own enable switch so a bare checkout never shells out to mmdc.
+    if diagram is not None and settings.council_diagram_enabled:
+        return CouncilImageChoice(image_type=IMAGE_TYPE_DIAGRAM, diagram=diagram)
 
     # Rule 2: rotation. Advance the persistent counter and only proceed on the
     # boundary. ``max(1, ...)`` clamps a fat-fingered 0/negative to "every post"
@@ -407,6 +443,7 @@ def attach_council_image(
     settings: Settings | None = None,
     render_quote_card: _QuoteCardRenderer | None = None,
     image_client: _ImageClient | None = None,
+    render_diagram: _DiagramRenderer | None = None,
     now: datetime | None = None,
 ) -> CouncilImageChoice:
     """Decide, generate, and ATTACH a council image to ``draft`` (BRD §13.6).
@@ -443,7 +480,11 @@ def attach_council_image(
     post_text = str(draft.get("post_text") or "")
     contrast = draft.get("contrast")
     contrast = contrast if isinstance(contrast, ContrastSpec) else None
-    choice = decide_council_image(post_text, contrast=contrast, settings=settings)
+    diagram = draft.get("diagram")
+    diagram = diagram if isinstance(diagram, DiagramSpec) else None
+    choice = decide_council_image(
+        post_text, contrast=contrast, diagram=diagram, settings=settings
+    )
 
     if choice.image_type == IMAGE_TYPE_NONE:
         _set_none(draft)
@@ -463,7 +504,7 @@ def attach_council_image(
         return CouncilImageChoice.none()
 
     # Generate the chosen image into bytes, degrading to text-only on any failure.
-    png = _generate(choice, settings, render_quote_card, image_client)
+    png = _generate(choice, settings, render_quote_card, image_client, render_diagram)
     if png is None:
         _set_none(draft)
         return CouncilImageChoice.none()
@@ -490,13 +531,14 @@ def _generate(
     settings: Settings,
     render_quote_card: _QuoteCardRenderer | None,
     image_client: _ImageClient | None,
+    render_diagram: _DiagramRenderer | None = None,
 ) -> bytes | None:
     """Produce PNG bytes for ``choice``, or ``None`` on any generation failure.
 
-    Routes a quote card to the DETERMINISTIC renderer (words are always a card,
-    never diffusion — §13.6/D10) and a concept illustration to agy. Every failure
-    class is caught and turned into ``None`` so the caller degrades to text-only
-    (the image never blocks publishing).
+    Routes a quote card / diagram to a DETERMINISTIC renderer (words are always a
+    deterministic render, never diffusion — §13.6/D10) and a concept illustration
+    to agy. Every failure class is caught and turned into ``None`` so the caller
+    degrades to text-only (the image never blocks publishing).
     """
     if choice.image_type == IMAGE_TYPE_QUOTE_CARD:
         return _render_quote_card_safe(choice.quote_line or "", settings, render_quote_card)
@@ -504,7 +546,29 @@ def _generate(
         return _illustrate_safe(choice.illustration_prompt or "", settings, image_client)
     if choice.image_type == IMAGE_TYPE_CONTRAST and choice.contrast is not None:
         return _render_contrast_safe(choice.contrast, settings, image_client)
+    if choice.image_type == IMAGE_TYPE_DIAGRAM and choice.diagram is not None:
+        return _render_diagram_safe(choice.diagram, settings, render_diagram)
     return None
+
+
+def _render_diagram_safe(
+    diagram: DiagramSpec,
+    settings: Settings,
+    render_diagram: _DiagramRenderer | None,
+) -> bytes | None:
+    """Render the mermaid diagram to PNG, catching any failure → ``None``.
+
+    Mermaid rendering shells out to ``mmdc`` (a headless browser), so it can fail
+    many ways; every one surfaces as :class:`DiagramRenderError` and degrades to
+    text-only rather than blocking the post (§13.6). The default renderer is the
+    module-level ``render_mermaid`` (a single patchable seam); tests inject a stub.
+    """
+    render = render_diagram if render_diagram is not None else render_mermaid
+    try:
+        return render(diagram.mermaid, settings)
+    except DiagramRenderError as exc:
+        logger.warning("Council diagram render failed; degrading to text-only: %s", exc)
+        return None
 
 
 def _render_contrast_safe(
@@ -629,6 +693,11 @@ def _stamp_draft(
         draft["image_prompt"] = (
             f"LEFT: {choice.contrast.left_scene} | RIGHT: {choice.contrast.right_scene}"
         )
+    elif choice.image_type == IMAGE_TYPE_DIAGRAM and choice.diagram is not None:
+        # A diagram is DETERMINISTIC (mermaid CLI, not diffusion); provenance
+        # records the renderer + the exact mermaid source for full auditability.
+        draft["image_source"] = "mermaid"
+        draft["image_prompt"] = choice.diagram.mermaid
     else:  # IMAGE_TYPE_CONCEPT
         draft["image_source"] = settings.image_model
         draft["image_prompt"] = choice.illustration_prompt

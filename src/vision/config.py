@@ -200,6 +200,27 @@ class Settings(BaseSettings):
         default="prep/.council_image_state.json", alias="COUNCIL_IMAGE_STATE_PATH"
     )
 
+    # --- Diagram lane (tech posts get an AMPLIFYING, deterministic diagram) ---
+    # A genuinely technical post can carry a small mermaid diagram that AMPLIFIES
+    # its idea (how something is built, flows, or is changed by AI) - rendered
+    # DETERMINISTICALLY via the mermaid CLI, so text labels are allowed (precision
+    # rule §13.6/D10, same basis as the deterministic cards). This is the tech
+    # lane's image: it carries a piece of the argument the words cannot, and it is
+    # exempt from the anime/no-text rule because it is an information graphic, not
+    # decorative art. Fail-closed default OFF so a bare checkout never shells out.
+    council_diagram_enabled: bool = Field(
+        default=False, alias="COUNCIL_DIAGRAM_ENABLED"
+    )
+    # The mermaid-CLI command used to render a diagram spec to PNG (resolved via
+    # PATH, so 'mmdc' / 'mmdc.cmd' both work). Owner-editable because the binary
+    # location varies per host (§22.6).
+    diagram_mmdc_cmd: str = Field(default="mmdc", alias="DIAGRAM_MMDC_CMD")
+    # Hard timeout (seconds) on a single mmdc render - it spins a headless browser,
+    # so cap it and degrade to text-only rather than hang the pipeline.
+    diagram_render_timeout_s: int = Field(
+        default=60, alias="DIAGRAM_RENDER_TIMEOUT_S"
+    )
+
     # --- Content -----------------------------------------------------------
     recency_hours: int = Field(default=48, alias="RECENCY_HOURS")
     grounding_min_pct: int = Field(default=100, alias="GROUNDING_MIN_PCT")
