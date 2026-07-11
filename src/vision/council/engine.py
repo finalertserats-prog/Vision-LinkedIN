@@ -23,6 +23,7 @@ from vision.config import Settings, get_settings
 from vision.council.compose import Composer
 from vision.council.deliberate import Deliberation, Deliberator
 from vision.council.diagram import DiagramWriter
+from vision.council.hashtags import HashtagWriter
 from vision.council.formats import RecentFormatStore
 from vision.council.problems import ProblemQueue
 from vision.council.topics import TopicEngine
@@ -170,6 +171,20 @@ def run_council(
         )
         if composed.diagram is not None:
             logger.info("Attached an in-sync diagram generated from the post.")
+
+    # 3.6 HASHTAGS (fallback). The compose prompt asks for 3-5 hashtags but the
+    #     composing voice often drops them. When the post carries none, generate
+    #     them FROM the finished post and APPEND to the body so they publish (the
+    #     publisher renders post_text verbatim; the hashtags field is metadata).
+    #     Fail-soft: a miss just ships the post without hashtags, as before.
+    if settings.council_hashtags_enabled and not composed.hashtags:
+        tags = HashtagWriter(voices=voices, settings=settings).hashtags_for(
+            composed.post_text
+        )
+        if tags:
+            composed.hashtags = tags
+            composed.post_text = composed.post_text.rstrip() + "\n\n" + " ".join(tags)
+            logger.info("Appended %d generated hashtags to the post.", len(tags))
 
     # 4. ASSEMBLE the Draft-shaped dict. ``model_trace`` records per-stage
     #    provenance (which voices were live, the chosen format/situation) so the

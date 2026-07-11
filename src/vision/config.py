@@ -221,6 +221,18 @@ class Settings(BaseSettings):
         default=60, alias="DIAGRAM_RENDER_TIMEOUT_S"
     )
 
+    # --- Hashtag fallback --------------------------------------------------
+    # The compose prompt asks for 3-5 hashtags, but the headless composing voice
+    # frequently drops them (along with the rest of the structured output). When
+    # the composed post carries none, a single-purpose voice call generates them
+    # FROM the finished post so every post ships with hashtags (LinkedIn reach).
+    # Default ON: this fulfils the existing spec, uses the voice transport already
+    # in use, and adds no external dependency. Fail-soft - a miss just ships the
+    # post without hashtags, exactly as today.
+    council_hashtags_enabled: bool = Field(
+        default=True, alias="COUNCIL_HASHTAGS_ENABLED"
+    )
+
     # --- Content -----------------------------------------------------------
     recency_hours: int = Field(default=48, alias="RECENCY_HOURS")
     grounding_min_pct: int = Field(default=100, alias="GROUNDING_MIN_PCT")
