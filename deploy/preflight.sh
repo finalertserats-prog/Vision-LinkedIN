@@ -67,6 +67,15 @@ else
   warn "claude not on PATH for this user"
 fi
 
+# 8) mermaid CLI (mmdc) — needed for the tech-post DIAGRAM lane. Optional: a
+#    missing mmdc degrades a technical post to its anime concept illustration
+#    (never a crash), but the in-sync diagram will not render without it.
+if command -v mmdc >/dev/null 2>&1; then
+  ok "mermaid CLI (mmdc) present — diagram lane will render"
+else
+  warn "mmdc not found — tech posts fall back to concept art (npm i -g @mermaid-js/mermaid-cli)"
+fi
+
 echo ""
 if [ "$fail" -eq 0 ]; then
   echo "PREFLIGHT PASSED. Next: run one real end-to-end council pass, then arm the timers (see DEPLOY.md)."

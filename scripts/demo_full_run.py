@@ -53,7 +53,7 @@ os.environ["VISION_ENV"] = "dry_run"
 from vision.cli.daily import run_daily  # noqa: E402  (import after env is pinned)
 from vision.config import Settings, SignatureMode, VisionEnv  # noqa: E402
 from vision.db.base import Base  # noqa: E402
-from vision.db import models  # noqa: E402  (register tables on Base.metadata)
+from vision.db import models  # noqa: E402, F401  (register tables on Base.metadata)
 from vision.db.models import Draft, OwnPost, Run, Source  # noqa: E402
 from vision.ingest.feeds import FeedHealth, FetchResult, RawItem  # noqa: E402
 from vision.logging_setup import configure_logging, get_logger  # noqa: E402

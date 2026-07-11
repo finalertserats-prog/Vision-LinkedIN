@@ -221,6 +221,33 @@ def test_render_mermaid_raises_on_empty_source(tmp_path: Path) -> None:
         render_mermaid("   ", _settings(tmp_path))
 
 
+def test_render_mermaid_wraps_io_error_as_diagram_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: the temp volume is full / read-only — TemporaryDirectory raises
+    # OSError. The contract is that this degrades (DiagramRenderError), never a
+    # bare OSError that would unwind through run_council and abort the post.
+    monkeypatch.setattr(diagram_renderer.shutil, "which", lambda _cmd: "mmdc")
+
+    class _BoomTempDir:
+        def __init__(self, *args: object, **kwargs: object) -> None: ...
+        def __enter__(self) -> str:
+            raise OSError("no space left on device")
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(diagram_renderer.tempfile, "TemporaryDirectory", _BoomTempDir)
+    # Act / Assert
+    with pytest.raises(DiagramRenderError):
+        render_mermaid(_MERMAID, _settings(tmp_path))
+
+
+def test_parse_diagram_rejects_prefix_lookalike() -> None:
+    # 'graphql' must NOT masquerade as the 'graph' diagram type.
+    assert _parse_diagram(["graphql is a query language, not a diagram"]) is None
+
+
 # --- 4. attach: end-to-end wiring + degrade ---------------------------------
 
 

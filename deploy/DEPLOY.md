@@ -32,6 +32,11 @@ Everything runs as the **`vision`** service user under **`/opt/vision`**.
   If you set Brahmastra up under a different user, either re-auth as `vision` or
   change `User=`/`Group=` in the units to that user.
 - Optional: **`rclone`** (for Drive backups), **PostgreSQL** (else SQLite is fine).
+- Optional: **`mmdc`** (mermaid CLI) for the tech-post **diagram lane**. Install with
+  `npm i -g @mermaid-js/mermaid-cli` (needs Node + the headless-Chromium system libs
+  puppeteer pulls in, e.g. `libnss3 libatk1.0-0 libgbm1` on Debian/Ubuntu). Without
+  it, a technical post degrades to its anime concept illustration (never a crash).
+  Enable the lane with `COUNCIL_DIAGRAM_ENABLED=true` in `.env`.
 
 > **Why the council/retention units use `ProtectSystem=full` and not `strict`/`ProtectHome`:**
 > the CLIs and rclone **refresh their OAuth tokens in `$HOME`**. Stricter hardening

@@ -203,7 +203,7 @@ def main() -> int:
     print(f"Subject     : {subject}")
     print(f"Post chars  : {len(_POST_TEXT):,}")
     print(f"Sources     : {len(_sources())}")
-    print(f"Buttons     : Approve / Post now / Edit / Reject (real signed links)")
+    print("Buttons     : Approve / Post now / Edit / Reject (real signed links)")
     print(f"Mock accepted: {accepted}")
     print("-" * 72)
     print(f"HTML email written to: {_OUTPUT_PATH}  ({len(html):,} bytes)")

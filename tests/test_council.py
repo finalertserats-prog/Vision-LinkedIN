@@ -28,6 +28,7 @@ from vision.council.compose import (
     ForbiddenNameError,
     _parse_composition,
     _strip_em_dashes,
+    _strip_md_bold,
     contains_forbidden_name,
     find_forbidden_name,
 )
@@ -405,8 +406,6 @@ def test_contains_forbidden_name_detects_leak() -> None:
         "openai's model said otherwise",  # vendor
         "anthropic framed it differently",  # vendor
         "bard offered a third view",  # vendor
-        "the model occasionally slips",  # generic phrase the prompt forbids
-        "the models each took a side",  # plural of the generic phrase
     ],
 )
 def test_find_forbidden_name_catches_lowercase_and_vendor_variants(text: str) -> None:
@@ -423,12 +422,41 @@ def test_find_forbidden_name_catches_lowercase_and_vendor_variants(text: str) ->
         "We sang the gospel of shipping fast",  # 'gospel' must NOT match 'gpt'
         "A codependency between the teams",  # 'codex' substring guard
         "This modeling approach scaled well",  # 'model' as substring, no 'the '
+        "The model decides whether to answer or abstain",  # technical noun, not a brand
+        "How the model behaves under low confidence matters",  # technical noun
+        "You train the model on vetted clinical sources",  # technical noun
+        "The model thinks in tokens, not sentences",  # ML phrasing, not a brand leak
+        "the models each took a side of the trade-off",  # narration is a voice nit, not gated
     ],
 )
 def test_find_forbidden_name_ignores_innocent_words(text: str) -> None:
     # Arrange / Act / Assert: ordinary words that merely CONTAIN a token (or a
     # different 'the model...' compound) are not false positives.
     assert find_forbidden_name(text) is None
+
+
+def test_strip_md_bold_removes_emphasis_markers() -> None:
+    # A genuine **bold** span the composer emits is unwrapped (LinkedIn shows the
+    # literal asterisks otherwise).
+    assert _strip_md_bold("**The most important skill** is knowing when to stop.") == (
+        "The most important skill is knowing when to stop."
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "override __init__ and set __name__ to __main__",  # dunders MUST survive
+        "O(n ** 2) versus O(n ** 3) is the whole point",  # power operator MUST survive
+        "the value of x ** y grows fast",  # single power op, unpaired
+        "call some_function_name here",  # single underscores untouched
+        "2**3**4 chained exponent",  # tight chained power op MUST survive
+        "dict(**a,**b) merges two dicts",  # tight kwargs unpack MUST survive
+    ],
+)
+def test_strip_md_bold_preserves_tech_syntax(text: str) -> None:
+    # The target audience is TECH posts — code and math must pass through intact.
+    assert _strip_md_bold(text) == text
 
 
 def test_compose_fails_closed_on_forbidden_name_leak(tmp_path: Path) -> None:

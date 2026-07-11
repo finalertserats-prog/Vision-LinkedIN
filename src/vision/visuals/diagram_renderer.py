@@ -66,11 +66,16 @@ def render_mermaid(mermaid: str, settings: Settings | None = None) -> bytes:
     if cmd is None:
         raise DiagramRenderError(f"mermaid CLI not found on PATH: {settings.diagram_mmdc_cmd!r}")
 
-    with tempfile.TemporaryDirectory(prefix="vision-diagram-") as tmp:
-        in_path = Path(tmp) / "diagram.mmd"
-        out_path = Path(tmp) / "diagram.png"
-        in_path.write_text(src, encoding="utf-8")
-        try:
+    # ALL I/O here (temp-dir creation, write, subprocess launch, read-back) is
+    # inside the try so ANY OSError - e.g. a full/read-only temp volume on the VPS -
+    # becomes a DiagramRenderError, never a bare OSError that would unwind through
+    # attach_council_image / run_council and abort the post. The "diagram never
+    # blocks the post" invariant depends on this catch being total.
+    try:
+        with tempfile.TemporaryDirectory(prefix="vision-diagram-") as tmp:
+            in_path = Path(tmp) / "diagram.mmd"
+            out_path = Path(tmp) / "diagram.png"
+            in_path.write_text(src, encoding="utf-8")
             proc = subprocess.run(
                 [
                     cmd,
@@ -83,22 +88,19 @@ def render_mermaid(mermaid: str, settings: Settings | None = None) -> bytes:
                 text=True,
                 timeout=max(1, settings.diagram_render_timeout_s),
             )
-        except subprocess.TimeoutExpired as exc:
-            raise DiagramRenderError("mermaid render timed out") from exc
-        except OSError as exc:
-            raise DiagramRenderError(
-                f"mermaid render could not start ({exc.__class__.__name__})"
-            ) from exc
-
-        if proc.returncode != 0:
-            # Bound the stderr so a noisy CLI can't flood the log; no diagram body.
-            raise DiagramRenderError(
-                f"mermaid render exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-            )
-        try:
+            if proc.returncode != 0:
+                # Bound the stderr so a noisy CLI can't flood the log; no diagram body.
+                raise DiagramRenderError(
+                    f"mermaid render exited {proc.returncode}: {proc.stderr.strip()[:200]}"
+                )
             data = out_path.read_bytes()
-        except OSError as exc:
-            raise DiagramRenderError("mermaid render produced no output file") from exc
-        if not data:
-            raise DiagramRenderError("mermaid render produced an empty file")
-        return data
+            if not data:
+                raise DiagramRenderError("mermaid render produced an empty file")
+            return data
+    except subprocess.TimeoutExpired as exc:
+        raise DiagramRenderError("mermaid render timed out") from exc
+    except OSError as exc:
+        # Temp-dir/write/launch/read failure (disk full, read-only tmp, WinError 193).
+        raise DiagramRenderError(
+            f"mermaid render I/O failed ({exc.__class__.__name__})"
+        ) from exc

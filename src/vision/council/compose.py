@@ -4,9 +4,10 @@ WHY this module exists: the raw debate is never published. The composer (the
 editorial Claude voice) reads the two-round deliberation and writes ONE LinkedIn
 post plus an unnamed 'Council' block, obeying the owner-approved HARD RULES:
 
-  * **De-named voices** — the post/council block NEVER name Gemini/Codex/Claude/
-    GPT/'the model'; the only attribution anywhere is the final line
-    'Powered by Brahmastra'.
+  * **De-named voices** — the post/council block NEVER name an AI VENDOR/BRAND
+    (Gemini/Codex/Claude/GPT/ChatGPT/OpenAI/Anthropic/Bard); the only attribution
+    anywhere is the final line 'Powered by Brahmastra'. ('the model' as a plain
+    technical noun is allowed — it is not a vendor leak.)
   * **Honesty gate** — the composer first judges whether the council genuinely
     DISAGREED, AGREED, or one voice SHIFTED, and never manufactures a fight that
     didn't happen.
@@ -20,7 +21,7 @@ The COMPOSE PROMPT below is VERBATIM from the proven, owner-approved prototype
 structured PARSING of the model's fixed-shape output into a
 :class:`ComposedPost` (format / situation / post_text / council_block / hashtags)
 so the rest of VISION consumes a typed result, and a FAIL-CLOSED de-naming gate:
-if a forbidden model/vendor name (or 'the model') leaks into the post or council
+if a forbidden AI vendor/brand name leaks into the post or council
 block, :meth:`Composer.compose` raises :class:`ForbiddenNameError` and never
 returns the leaking post. The same detector is re-run at the publish end
 (:mod:`vision.publish.worker`) on the exact bytes about to hit LinkedIn, so the
@@ -97,14 +98,24 @@ _FORBIDDEN_NAME_TOKENS: tuple[str, ...] = (
 # \b before the token (so 'clause' does not match 'claude'); a trailing lookahead
 # that rejects a following WORD char ONLY when it is a letter — a digit or hyphen
 # after the token ('gpt-4', 'gpt4') is still a model reference and must match.
-# 'the model' / 'the models' is matched separately as a whole phrase.
 _FORBIDDEN_NAME_RE = re.compile(
     r"\b(?:"
     + "|".join(re.escape(tok) for tok in _FORBIDDEN_NAME_TOKENS)
-    + r")(?![A-Za-z])"
-    + r"|\bthe models?\b",
+    + r")(?![A-Za-z])",
     re.IGNORECASE,
 )
+
+# WHY 'the model' is NOT in the fail-closed gate: it is not a vendor leak. The
+# only real de-naming risk is a BRAND name (above). A reader who sees "the model"
+# in a post about AI learns nothing about the machinery, and "the model" is the
+# ordinary technical noun a TECH post constantly needs ("the model retrieves",
+# "the model decides whether to answer"). An earlier attempt to catch only
+# NARRATION ("the model argued") was both porous and prone to false positives on
+# legitimate ML phrasing ("the model thinks in tokens"), and because the gate is
+# fail-closed WITH NO RETRY, a false positive silently killed an otherwise
+# excellent post for the day. Machinery-narration is a voice nit handled by the
+# compose prompt's HARD RULES, never by a fail-closed abort. Vendor NAMES stay
+# hard-blocked at both the compose and publish ends.
 
 # Matches a "#hashtag" token (letters/digits/underscore after the hash).
 _HASHTAG_RE = re.compile(r"#\w+")
@@ -118,6 +129,29 @@ _EM_DASHES = str.maketrans({"—": "-", "–": "-"})
 def _strip_em_dashes(text: str) -> str:
     """Replace em/en dashes with a plain hyphen (owner authenticity rule)."""
     return text.translate(_EM_DASHES)
+
+
+# LinkedIn does not render Markdown, so a **bold** span the composing voice emits
+# (despite the prompt forbidding it) shows literal asterisks in the published post.
+# Strip the paired markers, keeping the inner text. CAREFULLY, because the target
+# audience is TECH posts:
+#   * Only '**' is handled - '__' is NOT, so Python dunders ('__init__', '__name__')
+#     are never mangled.
+#   * The '(?=\S)'/'(?<=\S)' guards require the content to be flush against the
+#     markers (real bold is '**word**'), so the power operator with spaces
+#     ('O(n ** 2) versus O(n ** 3)') never matches and is left intact.
+#   * The '(?<![\w*])' / '(?![\w*])' boundary guards require the markers to sit at
+#     a word edge, so tight code with no surrounding spaces is also safe:
+#     '2**3**4' (chained power) and 'dict(**a,**b)' (kwargs unpack) are untouched,
+#     while real emphasis (bounded by spaces/punctuation/line edges) still strips.
+# Non-greedy and newline-bounded so an unpaired '**' or a multi-line accident is
+# left alone rather than eating the whole post.
+_MD_BOLD_RE = re.compile(r"(?<![\w*])\*\*(?=\S)([^\n*]+?)(?<=\S)\*\*(?![\w*])")
+
+
+def _strip_md_bold(text: str) -> str:
+    """Remove Markdown **bold** markers (emphasis only), keeping the inner text."""
+    return _MD_BOLD_RE.sub(lambda m: m.group(1), text)
 
 
 # The compose model non-deterministically prettifies output with Markdown (bold
@@ -272,7 +306,9 @@ def _parse_diagram(diagram_lines: list[str]) -> DiagramSpec | None:
         return None
     first = next((ln.strip() for ln in src.splitlines() if ln.strip()), "")
     opener = first.lower().split(maxsplit=1)[0] if first else ""
-    if not any(opener == h or opener.startswith(h) for h in _MERMAID_HEADERS):
+    # Exact match, or a versioned variant ('statediagram-v2') - NOT a mere prefix,
+    # so 'graphql' does not masquerade as 'graph'.
+    if not any(opener == h or opener.startswith(h + "-") for h in _MERMAID_HEADERS):
         return None
     return DiagramSpec(mermaid=src)
 
@@ -315,12 +351,14 @@ def find_forbidden_name(text: str) -> str | None:
 
     Case-INSENSITIVE with word boundaries (see :data:`_FORBIDDEN_NAME_RE`): catches
     lowercase/possessive/vendor variants ('gemini', "gemini's", 'gpt-4', 'chatgpt',
-    'openai', 'anthropic', 'bard') and the generic 'the model', while an ordinary
-    word that merely contains a token ('clause') is NOT a false positive. Returns
-    the matched substring (for logging/alerting) so the caller can fail closed.
+    'openai', 'anthropic', 'bard'), while an ordinary word that merely contains a
+    token ('clause') is NOT a false positive. Only BRAND names are gated: the plain
+    technical noun 'the model' is allowed (a tech post needs it), because it is not
+    a vendor leak - see the note on :data:`_FORBIDDEN_NAME_RE`. Returns the matched
+    substring (for logging/alerting) so the caller can fail closed.
     """
     match = _FORBIDDEN_NAME_RE.search(text)
-    return match.group(0) if match else None
+    return match.group(0) if match is not None else None
 
 
 def contains_forbidden_name(text: str) -> bool:
@@ -389,6 +427,14 @@ def _parse_composition(raw: str) -> ComposedPost:
     section: str | None = None  # which multi-line section we're accumulating
 
     for line in raw.splitlines():
+        # Once inside the DIAGRAM section, accumulate every remaining line VERBATIM
+        # and skip header/HR/signature detection: DIAGRAM is always the LAST section,
+        # and a mermaid line (e.g. a node named 'Council') must never be mistaken for
+        # a header and truncate the diagram.
+        if section == "diagram":
+            diagram_lines.append(line)
+            continue
+
         # Detect headers on a Markdown-normalized copy, but accumulate the ORIGINAL
         # line so the post's own formatting/indentation survives.
         norm = _demarkdown(line)
@@ -453,11 +499,11 @@ def _parse_composition(raw: str) -> ComposedPost:
             post_lines.append(line)
         elif section == "council":
             council_lines.append(line)
-        elif section == "diagram":
-            diagram_lines.append(line)
 
     post_text = _strip_em_dashes(
-        _strip_trailing_outro(_strip_leading_preamble("\n".join(post_lines).strip()))
+        _strip_md_bold(
+            _strip_trailing_outro(_strip_leading_preamble("\n".join(post_lines).strip()))
+        )
     )
     council_block = _strip_em_dashes("\n".join(council_lines).strip())
     hashtags = _HASHTAG_RE.findall(post_text)
@@ -520,8 +566,10 @@ class Composer:
             "deliberation happened or that more than one mind was involved:\n"
             f"{transcript}\n\n"
             "HARD RULES:\n"
-            "- NEVER narrate the machinery. No AI/model names ('Gemini', 'Codex', 'Claude', "
-            "'GPT', 'the model'). Do NOT mention a 'council', 'voices', 'one voice', "
+            "- NEVER narrate the machinery. No AI VENDOR/BRAND names ('Gemini', 'Codex', "
+            "'Claude', 'GPT', 'ChatGPT', 'OpenAI', 'Anthropic'). You MAY use 'the model' "
+            "as an ordinary technical term when the topic is AI ('the model retrieves...'), "
+            "but do NOT narrate a deliberation: no 'council', 'voices', 'one voice', "
             "'another', 'a third', 'some argued', 'the room', a 'debate' or a 'deliberation'. "
             "NEVER write 'I watched a council change its mind' or any variant. The post is "
             "simply the OWNER thinking out loud, and it must START straight from the idea.\n"
@@ -658,8 +706,8 @@ class Composer:
 
         Runs the editorial voice, parses the fixed-shape output, and — if the
         chosen format is a known :data:`FORMATS` key — records it so the next run
-        avoids repeating it. De-naming is FAIL-CLOSED: if a forbidden model/vendor
-        name (or 'the model') leaks into the post OR council block despite the HARD
+        avoids repeating it. De-naming is FAIL-CLOSED: if a forbidden AI vendor/brand
+        name leaks into the post OR council block despite the HARD
         RULES, this raises :class:`ForbiddenNameError` and NEVER returns a leaking
         post — the #1 published-text rule wins over shipping. Composing is also
         fail-closed on empty output.

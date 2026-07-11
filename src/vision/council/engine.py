@@ -22,6 +22,7 @@ from typing import Any
 from vision.config import Settings, get_settings
 from vision.council.compose import Composer
 from vision.council.deliberate import Deliberation, Deliberator
+from vision.council.diagram import DiagramWriter
 from vision.council.formats import RecentFormatStore
 from vision.council.problems import ProblemQueue
 from vision.council.topics import TopicEngine
@@ -157,6 +158,18 @@ def run_council(
         if problem is not None
         else composer.compose(deliberation)
     )
+
+    # 3.5 DIAGRAM (decoupled, in-sync). The inline DIAGRAM: contract is unreliable -
+    #     the composing voice often returns just the post prose and drops the whole
+    #     structured output. So when the diagram lane is on and compose produced no
+    #     diagram, generate one FROM the finished post (a single-purpose prompt over
+    #     the final text). Fail-soft: any miss leaves the post on its fallback image.
+    if settings.council_diagram_enabled and composed.diagram is None:
+        composed.diagram = DiagramWriter(voices=voices, settings=settings).diagram_for(
+            composed.post_text
+        )
+        if composed.diagram is not None:
+            logger.info("Attached an in-sync diagram generated from the post.")
 
     # 4. ASSEMBLE the Draft-shaped dict. ``model_trace`` records per-stage
     #    provenance (which voices were live, the chosen format/situation) so the
