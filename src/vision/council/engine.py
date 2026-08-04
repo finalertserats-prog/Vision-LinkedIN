@@ -50,19 +50,17 @@ def _build_transcript(delib: Deliberation) -> dict[str, dict[str, str]]:
     }
 
 
-def _last_visual_was_diagram(settings: Settings) -> bool:
-    """True when the previous council post's image was a diagram.
+def _diagram_on_cooldown(settings: Settings) -> bool:
+    """True when a diagram may NOT run yet (its cooldown has not elapsed).
 
-    Reads the image ledger directly (a cheap JSON read) so the engine can skip the
-    diagram-writer model call entirely on the post after a diagram. Fail-soft: any
-    ledger problem reads as "not a diagram", which favours ASKING - the visual
-    layer still applies the same no-two-in-a-row guard, so a false negative here
-    costs one model call, never a repeated diagram.
+    Lets the engine skip the diagram-writer model call entirely during the
+    cooldown - the visual layer enforces the same rule authoritatively, so this is
+    purely an optimisation and a false negative costs one wasted call, never an
+    extra diagram. Imported locally to keep engine→visual a one-way dependency.
     """
-    from vision.council.visual import IMAGE_TYPE_DIAGRAM, _CouncilImageLedger
+    from vision.council.visual import diagram_allowed
 
-    ledger = _CouncilImageLedger.from_settings(settings)
-    return ledger.last_visual_kind() == IMAGE_TYPE_DIAGRAM
+    return not diagram_allowed(settings)
 
 
 def _frame_problem(problem: str) -> str:
@@ -193,8 +191,8 @@ def run_council(
     #     post was a diagram we do not even ASK, which saves a model call and
     #     guarantees hand-drawn art gets the next turn.
     if settings.council_diagram_enabled and composed.diagram is None:
-        if _last_visual_was_diagram(settings):
-            logger.info("Previous post was a diagram; skipping the diagram lane.")
+        if _diagram_on_cooldown(settings):
+            logger.info("Diagram lane on cooldown; this post gets hand-drawn art.")
         else:
             composed.diagram = DiagramWriter(
                 voices=voices, settings=settings

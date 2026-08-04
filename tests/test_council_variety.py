@@ -110,11 +110,11 @@ def test_diagram_is_used_when_the_previous_post_was_not_a_diagram(tmp_path: Path
     assert choice.image_type == IMAGE_TYPE_DIAGRAM
 
 
-def test_diagram_cannot_run_twice_in_a_row(tmp_path: Path) -> None:
-    """After a diagram post, the next post degrades to art even if a diagram exists."""
-    # Arrange: stamp the ledger as if the previous post was a diagram.
+def test_diagram_is_blocked_during_its_cooldown(tmp_path: Path) -> None:
+    """A diagram right after another degrades to art, even when one is available."""
+    # Arrange: a diagram just ran, so the cooldown is at 0 of 4.
     settings = _settings(tmp_path)
-    _CouncilImageLedger.from_settings(settings).remember_visual_kind(IMAGE_TYPE_DIAGRAM)
+    _CouncilImageLedger.from_settings(settings).record_diagram_used()
     spec = DiagramSpec(mermaid="flowchart TD\n A[One] --> B[Two]")
 
     # Act
@@ -122,6 +122,51 @@ def test_diagram_cannot_run_twice_in_a_row(tmp_path: Path) -> None:
 
     # Assert: art gets the turn, which is the whole point of the rule.
     assert choice.image_type == IMAGE_TYPE_CONCEPT
+
+
+def test_diagram_returns_once_the_cooldown_elapses(tmp_path: Path) -> None:
+    """After the configured gap of art posts, a diagram is allowed again."""
+    # Arrange: a diagram ran, then four art posts advanced the cooldown.
+    settings = _settings(tmp_path, COUNCIL_DIAGRAM_MIN_GAP=4)
+    ledger = _CouncilImageLedger.from_settings(settings)
+    ledger.record_diagram_used()
+    for _ in range(4):
+        ledger.record_non_diagram_post()
+    spec = DiagramSpec(mermaid="flowchart TD\n A[One] --> B[Two]")
+
+    # Act
+    choice = decide_council_image("A technical post.", diagram=spec, settings=settings)
+
+    # Assert
+    assert choice.image_type == IMAGE_TYPE_DIAGRAM
+
+
+def test_art_posts_advance_the_diagram_cooldown(tmp_path: Path) -> None:
+    """Choosing art moves the cooldown along so diagrams eventually return."""
+    # Arrange
+    settings = _settings(tmp_path)
+    ledger = _CouncilImageLedger.from_settings(settings)
+    ledger.record_diagram_used()
+
+    # Act
+    decide_council_image("A plain reflection.", settings=settings)
+
+    # Assert
+    assert _CouncilImageLedger.from_settings(settings).posts_since_diagram() == 1
+
+
+def test_zero_gap_disables_the_cooldown(tmp_path: Path) -> None:
+    """A gap of 0 restores unthrottled diagrams for anyone who wants them."""
+    # Arrange
+    settings = _settings(tmp_path, COUNCIL_DIAGRAM_MIN_GAP=0)
+    _CouncilImageLedger.from_settings(settings).record_diagram_used()
+    spec = DiagramSpec(mermaid="flowchart TD\n A[One] --> B[Two]")
+
+    # Act
+    choice = decide_council_image("A technical post.", diagram=spec, settings=settings)
+
+    # Assert
+    assert choice.image_type == IMAGE_TYPE_DIAGRAM
 
 
 def test_shares_theme_catches_a_paraphrased_repeat() -> None:

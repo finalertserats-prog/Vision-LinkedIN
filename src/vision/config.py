@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     council_state_path: str = Field(
         default="prep/.council_state.json", alias="COUNCIL_STATE_PATH"
     )
+    # Minimum number of posts between two diagrams. A "not twice in a row" rule
+    # still allowed alternating (half the feed), which is not the "rare exception"
+    # the owner asked for; a gap of 4 caps diagrams at roughly 1 post in 5 and
+    # leaves hand-drawn art as the visual identity. 0 disables the cooldown.
+    council_diagram_min_gap: int = Field(default=4, alias="COUNCIL_DIAGRAM_MIN_GAP")
     # Where recently-DEBATED TOPICS are remembered, so the council stops circling
     # the same subject (owner feedback 2026-08-04). Its own file because the
     # recent-format state is a bare JSON list and cannot carry a second key.

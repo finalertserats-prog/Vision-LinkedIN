@@ -87,6 +87,11 @@ _LEDGER_KEY_STAMPS = "generated_at"
 # diagram" (keep diagrams rare so art stays the identity).
 _LEDGER_KEY_LAST_STYLE = "last_art_style"
 _LEDGER_KEY_LAST_KIND = "last_visual_kind"
+# How many posts have run since the last diagram. Drives the diagram COOLDOWN: a
+# mere "not twice in a row" check still let diagrams take every other post, which
+# is not rare. Starts high so the very first diagram is never blocked.
+_LEDGER_KEY_SINCE_DIAGRAM = "posts_since_diagram"
+_SINCE_DIAGRAM_UNSET = 9999
 
 # --- Punchline heuristic geometry ------------------------------------------
 # A "strong one-line punchline" is a SHORT, declarative first line with NO
@@ -272,6 +277,26 @@ class _CouncilImageLedger:
         data[_LEDGER_KEY_LAST_STYLE] = style
         self._write(data)
 
+    def posts_since_diagram(self) -> int:
+        """How many posts have run since the last diagram (high when never)."""
+        value = self._read().get(_LEDGER_KEY_SINCE_DIAGRAM)
+        return value if isinstance(value, int) and value >= 0 else _SINCE_DIAGRAM_UNSET
+
+    def record_diagram_used(self) -> None:
+        """Reset the diagram cooldown — a diagram just ran."""
+        data = self._read()
+        data[_LEDGER_KEY_SINCE_DIAGRAM] = 0
+        self._write(data)
+
+    def record_non_diagram_post(self) -> None:
+        """Advance the diagram cooldown — this post used something other than a diagram."""
+        data = self._read()
+        current = data.get(_LEDGER_KEY_SINCE_DIAGRAM)
+        current = current if isinstance(current, int) and current >= 0 else _SINCE_DIAGRAM_UNSET
+        # Saturate rather than grow unbounded; anything past the gap means "allowed".
+        data[_LEDGER_KEY_SINCE_DIAGRAM] = min(current + 1, _SINCE_DIAGRAM_UNSET)
+        self._write(data)
+
     def last_visual_kind(self) -> str | None:
         """Return the previous post's image type (``None`` if unknown)."""
         value = self._read().get(_LEDGER_KEY_LAST_KIND)
@@ -368,6 +393,31 @@ def _is_strong_punchline(line: str) -> bool:
     return True
 
 
+def diagram_allowed(
+    settings: Settings | None = None, *, ledger: "_CouncilImageLedger | None" = None
+) -> bool:
+    """True when a diagram may run now (its cooldown has elapsed).
+
+    Shared by the engine (to skip the diagram-writer model call entirely) and the
+    visual layer (the authoritative guard), so "how rare is a diagram" has ONE
+    definition. A gap of 0 disables the cooldown.
+
+    Args:
+        settings: config source (defaults to the process singleton).
+        ledger: injectable ledger, so the caller that already built one need not
+            re-read the state file.
+
+    Returns:
+        Whether enough non-diagram posts have run since the last diagram.
+    """
+    settings = settings or get_settings()
+    gap = max(0, settings.council_diagram_min_gap)
+    if gap == 0:
+        return True
+    ledger = ledger or _CouncilImageLedger.from_settings(settings)
+    return ledger.posts_since_diagram() >= gap
+
+
 def _pick_art_style(last_style: str | None, *, rng: random.Random | None = None) -> str:
     """Choose an art register at random, never repeating the previous post's.
 
@@ -458,11 +508,14 @@ def decide_council_image(
     # the visual identity. Whether a diagram is offered at all is decided upstream
     # by the engine's worthiness gate; this is the second, cheaper guard.
     if diagram is not None and settings.council_diagram_enabled:
-        if ledger.last_visual_kind() != IMAGE_TYPE_DIAGRAM:
+        if diagram_allowed(settings, ledger=ledger):
             ledger.remember_visual_kind(IMAGE_TYPE_DIAGRAM)
+            ledger.record_diagram_used()
             return CouncilImageChoice(image_type=IMAGE_TYPE_DIAGRAM, diagram=diagram)
         logger.info(
-            "Council skipping a back-to-back diagram; falling through to art."
+            "Council diagram still on cooldown (%d of %d posts); using art instead.",
+            ledger.posts_since_diagram(),
+            max(0, settings.council_diagram_min_gap),
         )
 
     # Rule 2: rotation. Advance the persistent counter and only proceed on the
@@ -482,12 +535,14 @@ def decide_council_image(
     # anime concept illustration. Quote cards are retired from the council lane.
     if contrast is not None:
         ledger.remember_visual_kind(IMAGE_TYPE_CONTRAST)
+        ledger.record_non_diagram_post()
         return CouncilImageChoice(image_type=IMAGE_TYPE_CONTRAST, contrast=contrast)
     # Pick a register that differs from the previous post's so consecutive posts
     # never share a look, and remember it for next time.
     style = _pick_art_style(ledger.last_art_style())
     ledger.remember_art_style(style)
     ledger.remember_visual_kind(IMAGE_TYPE_CONCEPT)
+    ledger.record_non_diagram_post()
     logger.info("Council art register chosen.", extra={"art_style": style})
     return CouncilImageChoice(
         image_type=IMAGE_TYPE_CONCEPT,
