@@ -97,7 +97,13 @@ class Settings(BaseSettings):
         default="https://localhost/oauth/linkedin/callback", alias="LI_REDIRECT_URI"
     )
     # LinkedIn-Version header value, YYYYMM (§6). Pinned so API drift is explicit.
-    li_version: str = Field(default="202506", alias="LI_VERSION")
+    # NOTE: LinkedIn RETIRES versions on a rolling window. When a pinned value ages
+    # out, every publish fails with HTTP 426 NONEXISTENT_VERSION (hit 2026-08-04
+    # with 202506, which had simply stopped existing). Symptom is a "publish failed"
+    # alert, not a token problem — bump this to a current YYYYMM to fix. Probe with:
+    # GET https://api.linkedin.com/rest/me + LinkedIn-Version header; 426 means the
+    # version is gone, any other status means the version itself is accepted.
+    li_version: str = Field(default="202607", alias="LI_VERSION")
     publish_mode: PublishMode = Field(default=PublishMode.API, alias="PUBLISH_MODE")
     # Local time-of-day strings; parsed by the scheduler against ``tz``.
     publish_slot_local: str = Field(default="09:00", alias="PUBLISH_SLOT_LOCAL")
