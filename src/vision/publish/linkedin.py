@@ -54,6 +54,14 @@ _TOKEN_URL = f"{_OAUTH_BASE}/accessToken"
 _API_BASE = "https://api.linkedin.com"
 _USERINFO_URL = f"{_API_BASE}/v2/userinfo"
 _POSTS_URL = f"{_API_BASE}/rest/posts"
+
+# Characters LinkedIn's Little Text Format reserves inside ``commentary``. Every one
+# must be backslash-escaped or the post is truncated/restyled with NO error (see
+# ``_escape_commentary``). '#' is intentionally absent — it must stay bare so
+# hashtags keep linkifying. The backslash itself is handled separately, first.
+_LTF_RESERVED: tuple[str, ...] = (
+    "|", "{", "}", "@", "[", "]", "(", ")", "<", ">", "*", "_", "~",
+)
 _IMAGES_URL = f"{_API_BASE}/rest/images"
 
 # Least-privilege scopes (BRD §16): OpenID trio to read the member id + the one
@@ -452,10 +460,15 @@ class LinkedInClient:
         self._raise_for_status(response, "find_existing_post")
         body = response.json() if response.content else {}
         elements = body.get("elements", []) if isinstance(body, dict) else []
+        # Compare against what we would actually SEND, not the raw draft text: the
+        # stored commentary is the ESCAPED form, so matching raw text here would
+        # never hit and the worker could re-post a duplicate after an ambiguous
+        # create. Accept either form so posts created before escaping still match.
+        wanted = {commentary, _escape_commentary(commentary)}
         for element in elements:
             # Match on the exact approved commentary — the one field guaranteed to
             # be identical between our intended post and the one LinkedIn created.
-            if isinstance(element, dict) and element.get("commentary") == commentary:
+            if isinstance(element, dict) and element.get("commentary") in wanted:
                 urn = element.get("id")
                 if isinstance(urn, str) and urn:
                     return urn
@@ -493,7 +506,9 @@ def _base_post_payload(author_urn: str, text: str, visibility: str) -> dict[str,
     """Return the shared ``/rest/posts`` body for text and image posts (§15.2)."""
     return {
         "author": author_urn,  # inherently the owner (personal profile, §15.6)
-        "commentary": text,  # the post body exactly as approved
+        # Escaped for Little Text Format: an unescaped reserved character makes
+        # LinkedIn TRUNCATE the body with no error at all (see _escape_commentary).
+        "commentary": _escape_commentary(text),
         "visibility": visibility,  # PUBLIC by default
         # Explicit distribution: main feed, no external channels, no targeting.
         "distribution": {
@@ -504,6 +519,40 @@ def _base_post_payload(author_urn: str, text: str, visibility: str) -> dict[str,
         "lifecycleState": "PUBLISHED",  # publish immediately (no native drafts)
         "isReshareDisabledByAuthor": False,
     }
+
+
+def _escape_commentary(text: str) -> str:
+    """Escape ``text`` for the Posts API ``commentary`` field (Little Text Format).
+
+    WHY this exists (incident 2026-08-04): a published post was SILENTLY TRUNCATED
+    at its first ``|``. ``commentary`` is not a plain string — LinkedIn parses it as
+    Little Text Format, where ``\\ | { } @ [ ] ( ) < > * _ ~`` are reserved. Sending
+    the composed post raw meant any shell snippet, bracketed aside or maths could cut
+    the post off mid-sentence while the create still returned 201 and the draft was
+    marked published. There is no error to catch: escaping at this boundary is the
+    only defence.
+
+    ``#`` is deliberately NOT escaped. Live posts prove an unescaped ``#`` becomes a
+    real hashtag, and escaping it would kill that while forcing us to guess which
+    ``#`` starts a tag (``C#``, ``docs#section``) — a guess with a real downside and
+    no upside.
+
+    The backslash is escaped FIRST; doing it later would let a just-inserted escape
+    character be escaped again and leave the reserved character it was protecting
+    bare. Input is always plain composed prose (never pre-escaped), so a single pass
+    is correct.
+
+    Args:
+        text: the approved post body, exactly as written.
+
+    Returns:
+        The same text with every reserved character backslash-escaped.
+    """
+    # Backslash first — order matters (see docstring).
+    escaped = text.replace("\\", "\\\\")
+    for char in _LTF_RESERVED:
+        escaped = escaped.replace(char, f"\\{char}")
+    return escaped
 
 
 def _extract_post_urn(response: httpx.Response) -> str:
