@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 from sqlalchemy.orm import Session
 
-from vision.cli.council import run_council_cli
+from vision.cli.council import main, run_council_cli
 from vision.config import Settings, SignatureMode, VisionEnv
 from vision.db.models import Draft
 
@@ -165,3 +165,104 @@ def test_staging_sends_the_approval_email(db_session: Session) -> None:
     # Assert: the sender was called once and the result reflects a sent email.
     sender.send.assert_called_once()
     assert result.email_sent is True
+
+
+# --- One-off topic override (`vision-council --topic "..."`) -----------------
+# WHY these exist: the owner's normal steer is the FIFO queue file, but a one-off
+# "post about THIS, now" needs a path that skips the queue (and the problem inbox,
+# which the engine already lets an explicit topic outrank). These tests pin the
+# plumbing: CLI flag -> run_council_cli(topic=...) -> run_council(topic=...).
+
+
+def test_explicit_topic_is_forwarded_to_the_engine(db_session: Session) -> None:
+    """A caller-supplied topic reaches the engine instead of its own topic pick."""
+    # Arrange
+    settings = _settings(VisionEnv.DRY_RUN)
+
+    # Act
+    with patch(_ENGINE_TARGET, return_value=_council_payload()) as engine:
+        run_council_cli(
+            _NOW,
+            VisionEnv.DRY_RUN,
+            session=db_session,
+            settings=settings,
+            sender=MagicMock(),
+            topic="Why clinical AI pilots die at integration",
+        )
+
+    # Assert: the engine was handed the exact topic (never the queue/proposal path).
+    assert engine.call_args.kwargs["topic"] == "Why clinical AI pilots die at integration"
+
+
+def test_no_topic_leaves_the_engine_choosing(db_session: Session) -> None:
+    """Without a topic the engine receives None and keeps its queue-first pick."""
+    # Arrange
+    settings = _settings(VisionEnv.DRY_RUN)
+
+    # Act
+    with patch(_ENGINE_TARGET, return_value=_council_payload()) as engine:
+        run_council_cli(
+            _NOW, VisionEnv.DRY_RUN, session=db_session, settings=settings, sender=MagicMock()
+        )
+
+    # Assert: an explicit None preserves the unchanged owner-queue-first behaviour.
+    assert engine.call_args.kwargs["topic"] is None
+
+
+def test_blank_topic_is_treated_as_no_topic(db_session: Session) -> None:
+    """A whitespace-only topic degrades to None rather than debating an empty string."""
+    # Arrange
+    settings = _settings(VisionEnv.DRY_RUN)
+
+    # Act
+    with patch(_ENGINE_TARGET, return_value=_council_payload()) as engine:
+        run_council_cli(
+            _NOW,
+            VisionEnv.DRY_RUN,
+            session=db_session,
+            settings=settings,
+            sender=MagicMock(),
+            topic="   ",
+        )
+
+    # Assert
+    assert engine.call_args.kwargs["topic"] is None
+
+
+def test_main_passes_the_topic_flag_through(db_session: Session) -> None:
+    """``vision-council --topic "..."`` threads the flag into the run."""
+    # Arrange: stub the session boundary + the run itself so this test covers ONLY
+    # the argv -> run_council_cli wiring (the run's own behaviour is tested above).
+    session_cm = MagicMock()
+    session_cm.__enter__.return_value = db_session
+
+    # Act
+    with (
+        patch("vision.cli.council.get_settings", return_value=_settings(VisionEnv.DRY_RUN)),
+        patch("vision.cli.council.get_session", return_value=session_cm),
+        patch("vision.cli.council.run_council_cli") as run,
+    ):
+        exit_code = main(["--topic", "A one-off subject"])
+
+    # Assert: a clean exit and the topic reached the run verbatim.
+    assert exit_code == 0
+    assert run.call_args.kwargs["topic"] == "A one-off subject"
+
+
+def test_main_without_the_flag_passes_no_topic(db_session: Session) -> None:
+    """A bare ``vision-council`` (cron's call) still runs with topic=None."""
+    # Arrange
+    session_cm = MagicMock()
+    session_cm.__enter__.return_value = db_session
+
+    # Act
+    with (
+        patch("vision.cli.council.get_settings", return_value=_settings(VisionEnv.DRY_RUN)),
+        patch("vision.cli.council.get_session", return_value=session_cm),
+        patch("vision.cli.council.run_council_cli") as run,
+    ):
+        exit_code = main([])
+
+    # Assert: the scheduled path is unchanged.
+    assert exit_code == 0
+    assert run.call_args.kwargs["topic"] is None

@@ -18,6 +18,13 @@ and the commit-before-send discipline are all imported from the daily lane, not
 re-implemented — so the council inherits every security property the daily job
 already proved (signed/expiring/single-use links, no-double-send, fail-closed).
 
+Topic selection: the scheduled call takes no arguments and the engine picks the
+subject (problem inbox → FIFO topic queue → proposed topic). ``--topic "..."``
+overrides that for ONE run — it outranks both queues and consumes neither, so a
+one-off "post about this" never spends a queued item:
+
+    python -m vision.cli.council --topic "Why clinical AI pilots die at integration"
+
 Run modes (FR-20, ``settings.vision_env``) — identical semantics to daily:
   * ``dry_run`` — compose + STORE the draft, but send NO email (safe default).
   * ``staging`` — send the approval email to the owner (self) to exercise the loop.
@@ -32,7 +39,9 @@ logged; the approval links carry signed, single-use, expiring tokens minted by
 
 from __future__ import annotations
 
+import argparse
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -215,6 +224,7 @@ def run_council_cli(
     session: Session,
     settings: Settings | None = None,
     sender: EmailSender | None = None,
+    topic: str | None = None,
 ) -> CouncilRunResult:
     """Run the council once, persist the draft, and (mode-gated) email the owner.
 
@@ -243,6 +253,11 @@ def run_council_cli(
       settings: config source; defaults to the process singleton.
       sender: injectable email sender so the whole run is unit-testable with NO
         SMTP/HTTP; defaults (lazily, inside the mailer) to the configured provider.
+      topic: an explicit one-off subject (the ``--topic`` flag). ``None`` — the
+        scheduled default — leaves the engine's unchanged pick: the owner's
+        problem inbox, then the FIFO topic queue, then a proposed topic. A given
+        topic outranks BOTH queues in the engine and consumes neither, so a
+        one-off never eats a queued item. Blank/whitespace degrades to ``None``.
 
     Returns:
       A frozen :class:`CouncilRunResult` with the draft id, content mode, whether
@@ -255,11 +270,22 @@ def run_council_cli(
     """
     settings = settings or get_settings()
     now = _as_utc(now)
-    logger.info("vision-council run starting", extra={"env": mode.value})
+    # Normalise ONCE, here, so every downstream consumer sees the same value: a
+    # blank/whitespace ``--topic ""`` is an absent topic, not a topic that happens
+    # to be empty (which would make the engine deliberate on nothing).
+    topic = topic.strip() if topic and topic.strip() else None
+    logger.info(
+        "vision-council run starting",
+        # The topic itself is owner content, not a secret, but we log only WHETHER
+        # one was supplied — the chosen topic is already logged by the engine.
+        extra={"env": mode.value, "explicit_topic": topic is not None},
+    )
 
     # 1. DELIBERATE + COMPOSE. Fail-closed: a hollow council raises inside the
     #    engine and the exception propagates (never email a fake council post).
-    payload = run_council(settings=settings)
+    #    ``topic=None`` is the engine's own default, so the scheduled path is
+    #    byte-for-byte the behaviour it had before the flag existed.
+    payload = run_council(topic=topic, settings=settings)
 
     # 2. DRAFT. Build the pending-approval council row and flush for its id (the
     #    approval tokens key on the draft id).
@@ -325,7 +351,31 @@ def run_council_cli(
     )
 
 
-def main() -> int:
+def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    """Parse ``vision-council``'s argv.
+
+    Kept a tiny, separately-testable helper so the flag surface has ONE definition
+    (cron passes no argv at all and must keep the exact behaviour it always had).
+    """
+    parser = argparse.ArgumentParser(
+        prog="vision-council",
+        description=(
+            "Run one council deliberation and email the owner an approvable draft."
+        ),
+    )
+    parser.add_argument(
+        "--topic",
+        default=None,
+        help=(
+            "Debate THIS subject for a one-off run instead of the owner queue's "
+            "next item. Outranks both the problem inbox and the topic queue and "
+            "consumes neither, so a queued topic is never spent on a one-off."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     """``vision-council`` console entry point (its own cron cadence, BRD §5).
 
     Configures logging, opens one transactional session, runs the council for the
@@ -333,7 +383,12 @@ def main() -> int:
     A fail-closed engine (no genuine council output) raises; the outer guard turns
     ANY unforeseen failure into a non-zero exit so a bad run alerts rather than
     silently posting nothing.
+
+    Args:
+      argv: command-line arguments (``None`` => ``sys.argv[1:]``, the scheduled
+        call). Injectable so the argv wiring is unit-testable without a subprocess.
     """
+    args = _parse_args(argv)
     configure_logging()
     settings = get_settings()
     mode = settings.vision_env
@@ -346,6 +401,7 @@ def main() -> int:
                 mode,
                 session=session,
                 settings=settings,
+                topic=args.topic,
             )
     except Exception:
         # Last-resort boundary: the transaction rolled back, nothing half-applied.
