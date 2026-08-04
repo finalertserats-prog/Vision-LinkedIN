@@ -37,7 +37,12 @@ from dataclasses import dataclass, field
 
 from vision.config import Settings, get_settings
 from vision.council.deliberate import Deliberation
-from vision.council.formats import FORMATS, RecentFormatStore
+from vision.council.formats import (
+    FORMATS,
+    UNCONDITIONAL_FORMATS,
+    RecentFormatStore,
+    choose_assigned_format,
+)
 from vision.council.voices import CLAUDE, VOICE_ORDER, Voices
 
 logger = logging.getLogger(__name__)
@@ -161,6 +166,10 @@ def _strip_md_bold(text: str) -> str:
 # Markdown (see _parse_composition).
 _HR_RE = re.compile(r"^\s*([-*_])\1{2,}\s*$")  # a Markdown horizontal rule
 _SIGNATURE_LINE = "powered by brahmastra"
+# The problem lane's single shape. Named (not a raw literal) so the prompt's
+# 'FORMAT: problem_solved' line and the fallback can never drift apart.
+_PROBLEM_FORMAT = "problem_solved"
+
 _FORMAT_KEYS = frozenset({"format", "format chosen"})
 _SITUATION_KEYS = frozenset({"situation", "honesty gate"})
 
@@ -541,12 +550,14 @@ class Composer:
         self._voices = voices or Voices(self._settings)
         self._recent = recent_store or RecentFormatStore.from_settings(self._settings)
 
-    def _build_prompt(self, delib: Deliberation) -> str:
-        """Assemble the compose prompt (VERBATIM from the prototype).
+    def _build_prompt(self, delib: Deliberation, assigned: str) -> str:
+        """Assemble the compose prompt around an ASSIGNED shape.
 
         The ``avoid`` list (recent formats) and the filtered ``menu`` come from the
-        injected store so variety is honoured, but the INSTRUCTION WORDING is the
-        proven, owner-approved text — unchanged.
+        injected store so variety is honoured. ``assigned`` is the shape this post
+        is told to take; the conditional shapes stay available as an override the
+        voice may take when one genuinely fits (see
+        :func:`~vision.council.formats.choose_assigned_format`).
         """
         avoid = self._recent.recent()
         menu = self._recent.menu_avoiding_recent()
@@ -606,9 +617,16 @@ class Composer:
             "1. HONESTY GATE (private judgement, NOT for the post): judge whether the raw "
             "material genuinely DISAGREED, AGREED, or SHIFTED. Never manufacture a tension "
             "that isn't there. This only shapes the post; it is never referenced in it.\n"
-            f"2. Pick the ONE format that best fits (avoid recently-used: {avoid}). A format "
-            "is the SHAPE of the owner's own post, never a report on a deliberation:\n"
-            + "\n".join(f"   - {k}: {v}" for k, v in menu.items())
+            f"2. WRITE THIS POST IN THIS SHAPE: {assigned} - {FORMATS[assigned]}\n"
+            "   A format is the SHAPE of the owner's own post, never a report on a "
+            "deliberation. Use the assigned shape UNLESS one of these genuinely fits "
+            "what actually happened in the raw material, in which case use that one "
+            "instead and say so on the FORMAT: line:\n"
+            + "\n".join(
+                f"   - {k}: {FORMATS[k]}"
+                for k in sorted(set(menu) - UNCONDITIONAL_FORMATS)
+            )
+            + f"\n   (recently used, avoid repeating: {avoid})"
             + "\n3. Write a LinkedIn post (700-1600 chars) as the owner's OWN natural "
             "first-person reflection on the idea — open straight from the thought, no "
             "meta-frame. Make people feel something: think, smile, or reconsider. 3-5 "
@@ -718,7 +736,12 @@ class Composer:
             ForbiddenNameError: when the composed post or council block names any
                 AI/model/vendor — the leak aborts the compose (never published).
         """
-        return self._compose_from_prompt(self._build_prompt(delib))
+        # Assign the shape up front so the recorded format is true by construction
+        # even when the voice drops the FORMAT: header (which it usually does).
+        assigned = choose_assigned_format(self._recent.recent())
+        return self._compose_from_prompt(
+            self._build_prompt(delib, assigned), fallback_format=assigned
+        )
 
     def compose_problem(self, delib: Deliberation, problem: str) -> ComposedPost:
         """Compose the 'problem & how we overcame it' post, grounded in ``problem``.
@@ -727,9 +750,14 @@ class Composer:
         story of a REAL problem the owner faced (``problem`` is GROUND TRUTH — never
         invented or contradicted); the deliberation only sharpens the angle + lesson.
         """
-        return self._compose_from_prompt(self._build_problem_prompt(delib, problem))
+        return self._compose_from_prompt(
+            self._build_problem_prompt(delib, problem),
+            # The problem lane has ONE shape by design (the overcome story), so its
+            # fallback is that lane tag rather than a rotating format.
+            fallback_format=_PROBLEM_FORMAT,
+        )
 
-    def _compose_from_prompt(self, prompt: str) -> ComposedPost:
+    def _compose_from_prompt(self, prompt: str, *, fallback_format: str) -> ComposedPost:
         """Run the compose voice on ``prompt`` with retries + fail-closed gates.
 
         Shared by :meth:`compose` and :meth:`compose_problem` so BOTH content lanes
@@ -820,6 +848,14 @@ class Composer:
             if not composed.council_block.strip():
                 logger.info("Council block empty (optional) — proceeding without it.")
 
+            # Resolve the format BEFORE recording. The voice usually omits the
+            # FORMAT: header entirely, which used to leave 'unknown' on every draft
+            # and left the variety window permanently empty. An echoed, known shape
+            # is trusted (it is the honest signal, and it is the only way a
+            # conditional shape can be reported); anything else resolves to the
+            # shape we assigned in the prompt, which the post was written to.
+            if composed.format not in FORMATS:
+                composed.format = fallback_format
             # Success: record the format (only real, known formats) and return.
             if composed.format in FORMATS:
                 self._recent.remember(composed.format)

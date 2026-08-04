@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,43 @@ FORMATS: dict[str, str] = {
     "what_they_missed": "Argue what all three AIs overlooked — leaving a clear slot for the human's lived-experience counter.",
     "quiet_observation": "No debate framing at all: publish the single sharpest insight as a plain, human reflection.",
 }
+
+
+# Formats that are HONEST for any deliberation, whatever happened in it. The rest
+# are CONDITIONAL — 'rare_consensus' needs genuine convergence, 'one_changed_mind'
+# needs a voice to have actually shifted, 'show_the_split' / 'steelman_both' need a
+# real disagreement — so assigning one up front could force a framing that did not
+# happen. Only this pool is ever assigned; a conditional shape is reachable solely
+# when the composing voice reports that it genuinely applies.
+UNCONDITIONAL_FORMATS: frozenset[str] = frozenset(
+    {"provocation", "uncomfortable_middle", "what_they_missed", "quiet_observation"}
+)
+
+
+def choose_assigned_format(
+    recent: list[str] | None = None, *, rng: random.Random | None = None
+) -> str:
+    """Pick the shape to ASSIGN to this post, avoiding recently-used ones.
+
+    WHY assign at all: the composing voice reliably drops the ``FORMAT:`` header
+    and returns bare prose, so every draft recorded ``format='unknown'`` — and a
+    shape that is never recorded can never be avoided, which is how the posts all
+    started to read alike. Assigning up front makes the recorded format true by
+    construction and puts variety under our control instead of the model's.
+
+    Args:
+        recent: recently-used format names to avoid.
+        rng: injectable random source so tests are deterministic.
+
+    Returns:
+        A key of :data:`FORMATS`, always drawn from :data:`UNCONDITIONAL_FORMATS`.
+    """
+    chooser = rng or random
+    avoid = set(recent or [])
+    pool = sorted(UNCONDITIONAL_FORMATS - avoid)
+    # Every shape used recently → reuse rather than return nothing; repeating one
+    # shape beats failing the compose.
+    return chooser.choice(pool or sorted(UNCONDITIONAL_FORMATS))
 
 
 @dataclass

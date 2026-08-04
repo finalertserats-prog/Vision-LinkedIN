@@ -34,7 +34,7 @@ from vision.council.compose import (
 )
 from vision.council.deliberate import Deliberation, Deliberator
 from vision.council.engine import run_council
-from vision.council.formats import FORMATS, RecentFormatStore
+from vision.council.formats import FORMATS, UNCONDITIONAL_FORMATS, RecentFormatStore
 from vision.council.topics import TopicEngine
 from vision.council.voices import CLAUDE, CODEX, GEMINI, VOICE_ORDER, Voices
 
@@ -576,8 +576,10 @@ def test_compose_records_chosen_format_for_next_run(tmp_path: Path) -> None:
     assert "show_the_split" in store.recent()
 
 
-def test_compose_prompt_lists_only_non_recent_formats(tmp_path: Path) -> None:
-    # Arrange: pre-seed a recent format, then capture the compose prompt.
+def test_compose_prompt_never_assigns_a_recent_format(tmp_path: Path) -> None:
+    # Arrange: pre-seed a recent format, then capture the compose prompt. The prompt
+    # now ASSIGNS one shape (rather than offering the whole menu), because the voice
+    # kept dropping the FORMAT: header and every draft recorded 'unknown'.
     store = RecentFormatStore(path=tmp_path / "s.json")
     store.remember("quiet_observation")
     fake = FakeVoices(lambda voice, prompt: _GOOD_COMPOSITION)
@@ -586,10 +588,17 @@ def test_compose_prompt_lists_only_non_recent_formats(tmp_path: Path) -> None:
     # Act.
     composer.compose(_delib())
 
-    # Assert: the composer's menu omitted the recently-used format's description.
+    # Assert: the recently-used shape is not what this post was told to write, and
+    # some other unconditional shape was assigned in its place.
     compose_prompt = fake.calls[-1][1]
     assert FORMATS["quiet_observation"] not in compose_prompt
-    assert FORMATS["provocation"] in compose_prompt
+    assert "WRITE THIS POST IN THIS SHAPE:" in compose_prompt
+    assigned = [
+        name
+        for name in UNCONDITIONAL_FORMATS
+        if name != "quiet_observation" and FORMATS[name] in compose_prompt
+    ]
+    assert len(assigned) == 1
 
 
 # --- 5. Exclusion guardrail -------------------------------------------------
