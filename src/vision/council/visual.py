@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,12 @@ _WEEK = timedelta(days=7)
 # key rename can't silently drift between read and write.
 _LEDGER_KEY_COUNTER = "rotation_counter"
 _LEDGER_KEY_STAMPS = "generated_at"
+# Remembers the LAST art register and the LAST visual kind so neither repeats
+# back-to-back. Two separate keys because they answer different questions: "which
+# art style did we just use" (avoid the same look twice) and "was the last post a
+# diagram" (keep diagrams rare so art stays the identity).
+_LEDGER_KEY_LAST_STYLE = "last_art_style"
+_LEDGER_KEY_LAST_KIND = "last_visual_kind"
 
 # --- Punchline heuristic geometry ------------------------------------------
 # A "strong one-line punchline" is a SHORT, declarative first line with NO
@@ -105,12 +112,34 @@ _HASHTAG_OR_MENTION_RE = re.compile(r"[#@]\w")
 # tension / mechanism / turning point as a single strong visual metaphor the
 # viewer grasps at a glance, still hand-drawn anime and strictly text-free.
 _CONCEPT_PROMPT_TEMPLATE = (
-    "A hand-drawn anime-style illustration that VISUALLY AMPLIFIES the core idea "
+    "{style} that VISUALLY AMPLIFIES the core idea "
     "of this reflection - depict its central tension, mechanism, or turning point "
     "as a single strong visual metaphor a viewer grasps at a glance, not a vague "
     "mood: {concept}. Purposeful and editorial, emotive, refined linework. "
     "Strictly no text, no words, no letters, no numbers, no logos."
 )
+
+# The ART REGISTERS the council rotates between (owner req 2026-08-04: "combination
+# of all three, randomize it"). WHY three registers rather than one template: a
+# single fixed anime prompt made consecutive posts look interchangeable, which is
+# the visual half of the "stale" complaint. Each entry is a self-contained opening
+# clause for _CONCEPT_PROMPT_TEMPLATE, so the style leads the prompt (image models
+# weight early tokens most). All three are HAND-DRAWN — never photographic — which
+# is the owner's standing rule.
+_ART_STYLES: dict[str, str] = {
+    "anime_key_art": (
+        "A hand-drawn anime key-art illustration, clean modern linework and "
+        "cinematic colour"
+    ),
+    "manga_ink": (
+        "A hand-drawn manga panel in high-contrast black-and-white ink with "
+        "screentone shading and bold panel framing"
+    ),
+    "painterly": (
+        "A hand-painted anime film still in a warm painterly style, soft light "
+        "and atmospheric background art"
+    ),
+}
 # Cap on how much of the post seeds the concept prompt — enough for theme, not so
 # much that the prompt turns into an essay agy would ignore.
 _CONCEPT_SEED_CHARS = 240
@@ -232,6 +261,28 @@ class _CouncilImageLedger:
                 exc.__class__.__name__,
             )
 
+    def last_art_style(self) -> str | None:
+        """Return the art register used on the previous post (``None`` if unknown)."""
+        value = self._read().get(_LEDGER_KEY_LAST_STYLE)
+        return value if isinstance(value, str) else None
+
+    def remember_art_style(self, style: str) -> None:
+        """Persist the art register just chosen, so the next post can avoid it."""
+        data = self._read()
+        data[_LEDGER_KEY_LAST_STYLE] = style
+        self._write(data)
+
+    def last_visual_kind(self) -> str | None:
+        """Return the previous post's image type (``None`` if unknown)."""
+        value = self._read().get(_LEDGER_KEY_LAST_KIND)
+        return value if isinstance(value, str) else None
+
+    def remember_visual_kind(self, kind: str) -> None:
+        """Persist the image type just chosen, so diagrams cannot run twice running."""
+        data = self._read()
+        data[_LEDGER_KEY_LAST_KIND] = kind
+        self._write(data)
+
     def next_rotation(self) -> int:
         """Advance and return the monotonic rotation counter (post index).
 
@@ -317,7 +368,28 @@ def _is_strong_punchline(line: str) -> bool:
     return True
 
 
-def _concept_prompt_from(post_text: str) -> str:
+def _pick_art_style(last_style: str | None, *, rng: random.Random | None = None) -> str:
+    """Choose an art register at random, never repeating the previous post's.
+
+    WHY exclude the last one rather than pure random: with only three registers a
+    uniform draw repeats roughly a third of the time, and two identical-looking
+    posts in a row is exactly the sameness the rotation exists to break. Falls
+    back to the full menu when ``last_style`` is unknown or not a current register
+    (so renaming a style can never empty the pool).
+
+    Args:
+        last_style: the register used on the previous post, if known.
+        rng: injectable random source so tests are deterministic.
+
+    Returns:
+        A key of :data:`_ART_STYLES`.
+    """
+    chooser = rng or random
+    candidates = [name for name in _ART_STYLES if name != last_style]
+    return chooser.choice(candidates or list(_ART_STYLES))
+
+
+def _concept_prompt_from(post_text: str, style: str) -> str:
     """Build the text-free concept-illustration prompt from the post's theme.
 
     Seeds the template with a trimmed slice of the post so the art stays on-theme
@@ -326,7 +398,8 @@ def _concept_prompt_from(post_text: str) -> str:
     so the precision rule (§13.6/D10) holds even when this prompt is logged.
     """
     seed = " ".join(post_text.split())[:_CONCEPT_SEED_CHARS].strip()
-    return _CONCEPT_PROMPT_TEMPLATE.format(concept=seed)
+    opening = _ART_STYLES.get(style) or next(iter(_ART_STYLES.values()))
+    return _CONCEPT_PROMPT_TEMPLATE.format(style=opening, concept=seed)
 
 
 def decide_council_image(
@@ -376,19 +449,26 @@ def decide_council_image(
         # on empty, but the lane must never assume that upstream).
         return CouncilImageChoice.none()
 
-    # Rule 1.5: the DIAGRAM lane. A technical post's diagram is CONTENT (it
-    # amplifies the idea), not decorative seasoning, so it bypasses the every-N
-    # rotation below - when a post genuinely warrants a diagram we show it. It is
-    # still bounded by the weekly cap (enforced in attach_council_image) and needs
-    # its own enable switch so a bare checkout never shells out to mmdc.
+    ledger = _CouncilImageLedger.from_settings(settings)
+
+    # Rule 1.5: the DIAGRAM lane, now the EXCEPTION rather than the default (owner
+    # req 2026-08-04: "always having a process flow makes it look very stale").
+    # A diagram still bypasses the every-N rotation when it runs - it is content,
+    # not seasoning - but it may NOT run twice in a row, so hand-drawn art stays
+    # the visual identity. Whether a diagram is offered at all is decided upstream
+    # by the engine's worthiness gate; this is the second, cheaper guard.
     if diagram is not None and settings.council_diagram_enabled:
-        return CouncilImageChoice(image_type=IMAGE_TYPE_DIAGRAM, diagram=diagram)
+        if ledger.last_visual_kind() != IMAGE_TYPE_DIAGRAM:
+            ledger.remember_visual_kind(IMAGE_TYPE_DIAGRAM)
+            return CouncilImageChoice(image_type=IMAGE_TYPE_DIAGRAM, diagram=diagram)
+        logger.info(
+            "Council skipping a back-to-back diagram; falling through to art."
+        )
 
     # Rule 2: rotation. Advance the persistent counter and only proceed on the
     # boundary. ``max(1, ...)`` clamps a fat-fingered 0/negative to "every post"
     # rather than a divide-by-zero.
     every_n = max(1, settings.council_image_every_n)
-    ledger = _CouncilImageLedger.from_settings(settings)
     counter = ledger.next_rotation()
     if counter % every_n != 0:
         logger.debug(
@@ -401,10 +481,17 @@ def decide_council_image(
     # A genuine two-sided contrast → the anime contrast card; otherwise a text-free
     # anime concept illustration. Quote cards are retired from the council lane.
     if contrast is not None:
+        ledger.remember_visual_kind(IMAGE_TYPE_CONTRAST)
         return CouncilImageChoice(image_type=IMAGE_TYPE_CONTRAST, contrast=contrast)
+    # Pick a register that differs from the previous post's so consecutive posts
+    # never share a look, and remember it for next time.
+    style = _pick_art_style(ledger.last_art_style())
+    ledger.remember_art_style(style)
+    ledger.remember_visual_kind(IMAGE_TYPE_CONCEPT)
+    logger.info("Council art register chosen.", extra={"art_style": style})
     return CouncilImageChoice(
         image_type=IMAGE_TYPE_CONCEPT,
-        illustration_prompt=_concept_prompt_from(body),
+        illustration_prompt=_concept_prompt_from(body, style),
     )
 
 

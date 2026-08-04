@@ -165,6 +165,17 @@ class Settings(BaseSettings):
     council_state_path: str = Field(
         default="prep/.council_state.json", alias="COUNCIL_STATE_PATH"
     )
+    # Where recently-DEBATED TOPICS are remembered, so the council stops circling
+    # the same subject (owner feedback 2026-08-04). Its own file because the
+    # recent-format state is a bare JSON list and cannot carry a second key.
+    council_topic_state_path: str = Field(
+        default="prep/.council_topic_state.json", alias="COUNCIL_TOPIC_STATE_PATH"
+    )
+    # How many recent TOPICS to remember and steer away from. Wider than the format
+    # window: subject repetition is far more visible to a reader than shape repetition.
+    council_recent_topic_window: int = Field(
+        default=8, alias="COUNCIL_RECENT_TOPIC_WINDOW"
+    )
 
     # --- Council image lane (BRD §13.6 wired into the council) -------------
     # WHY these live in Settings (config over code, §22.6): whether the council

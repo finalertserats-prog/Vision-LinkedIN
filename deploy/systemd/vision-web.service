@@ -49,8 +49,10 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-# The only writable path the service needs is its append-only log dir.
-ReadWritePaths=/opt/vision/logs
+# Writable: the whole app dir, NOT just logs. SQLite must create -wal/-journal
+# files NEXT TO the database, so a logs-only grant made the DB read-only and
+# every approval/publish/expire write failed with 'readonly database'.
+ReadWritePaths=/opt/vision
 
 # Structured JSON logs (logging_setup.py) appended to a stable file for ops.
 StandardOutput=append:/opt/vision/logs/vision-web.log

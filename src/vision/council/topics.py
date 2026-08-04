@@ -22,10 +22,12 @@ is expanduser'd so a '~/...'  path resolves on every OS.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from vision.config import Settings, get_settings
@@ -57,12 +59,70 @@ _DOMAINS: tuple[str, ...] = (
     "data, algorithms, and what our tools are actually optimizing for",
     "the economics, incentives, and power dynamics of technology and AI",
     "the frontier of AI/tech and its second- and third-order effects",
-    # Human / cross-domain (~40%).
+    # Human / cross-domain (~40%). REWEIGHTED 2026-08-04 (owner: "we are posting too
+    # much of this"): healthcare/institutional-failure pieces had come to dominate
+    # and every post read grave. Healthcare keeps ONE slot instead of leaning on the
+    # owner's day job, and the lighter registers get real weight so the feed varies
+    # in MOOD, not just subject.
     "human behavior — how we actually think, decide, and connect",
-    "healthcare, care, and the reality of operating systems people depend on",
     "a lighter, funnier, or more surprising everyday observation",
+    "something small and human you noticed this week that turned out to say a lot",
+    "a curiosity from science, history, or craft that reframes how you see a problem",
     "culture and society, and how technology is quietly reshaping them",
+    "healthcare and care systems — ONLY with a genuinely fresh, non-obvious angle",
 )
+
+
+@dataclass(frozen=True)
+class RecentTopicStore:
+    """Durable memory of recently-debated TOPICS (most-recent-first, capped).
+
+    Mirrors :class:`~vision.council.formats.RecentFormatStore`'s contract and
+    fail-soft discipline, but for subjects rather than shapes: a missing/corrupt
+    file reads as no history and a write failure is logged and swallowed, because
+    variety bookkeeping must never crash the council's content.
+    """
+
+    #: Where the recent-topic history is persisted (already expanduser'd).
+    path: Path
+    #: How many recent topics to remember and steer away from.
+    window: int = 8
+
+    @classmethod
+    def from_settings(cls, settings: Settings | None = None) -> "RecentTopicStore":
+        """Build a store from ``COUNCIL_TOPIC_STATE_PATH`` + the topic window."""
+        settings = settings or get_settings()
+        path = Path(os.path.expanduser(settings.council_topic_state_path))
+        window = max(1, settings.council_recent_topic_window)
+        return cls(path=path, window=window)
+
+    def recent(self) -> list[str]:
+        """Return recently-debated topics, most recent first (``[]`` on any problem)."""
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            logger.warning("Council recent-topic state is not valid JSON; ignoring it.")
+            return []
+        if not isinstance(data, list):
+            logger.warning("Council recent-topic state is not a list; ignoring it.")
+            return []
+        return [t for t in data if isinstance(t, str)][: self.window]
+
+    def remember(self, topic: str) -> None:
+        """Record ``topic`` as most-recently-debated, bounded to ``window``."""
+        updated = ([topic] + self.recent())[: self.window]
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(updated), encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "Council could not persist recent topics (%s); variety not stamped.",
+                exc.__class__.__name__,
+            )
 
 
 _PREAMBLE_RE = re.compile(r"^(here (are|is)|topics?\b|sure|okay|below are)\b", re.IGNORECASE)
@@ -71,6 +131,50 @@ _PREAMBLE_RE = re.compile(r"^(here (are|is)|topics?\b|sure|okay|below are)\b", r
 def _looks_like_preamble(line: str) -> bool:
     """True for a meta-scaffolding line the model leaked instead of a topic."""
     return bool(_PREAMBLE_RE.match(line.strip()))
+
+
+# Words too common to signal a shared subject — comparing on these would make every
+# topic look like every other one.
+_THEME_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "about", "after", "again", "against", "because", "been", "before", "being",
+        "between", "both", "could", "does", "doing", "from", "have", "having", "into",
+        "just", "keeps", "like", "made", "make", "makes", "many", "more", "most",
+        "much", "must", "never", "only", "other", "over", "really", "same", "should",
+        "since", "some", "still", "such", "than", "that", "their", "them", "then",
+        "there", "these", "they", "thing", "things", "this", "those", "through",
+        "under", "until", "very", "what", "when", "where", "which", "while", "with",
+        "without", "would", "your",
+    }
+)
+
+# How many significant words two topics must share before we call them the same
+# theme. Two is the sweet spot: one shared word fires on coincidence ("AI"), three
+# almost never fires on genuine repeats.
+_THEME_OVERLAP_MIN = 2
+
+
+def _theme_words(topic: str) -> set[str]:
+    """Reduce a topic to its significant lowercase words (4+ chars, non-stopword)."""
+    words = re.findall(r"[a-z]{4,}", topic.casefold())
+    return {w for w in words if w not in _THEME_STOPWORDS}
+
+
+def _shares_theme(candidate: str, recent_topics: list[str]) -> bool:
+    """True when ``candidate`` covers the same ground as any recent topic.
+
+    Compares significant-word overlap rather than exact strings: a proposer never
+    repeats a topic verbatim, it repeats the SUBJECT ("hospitals ... infusion
+    pumps" then "hospitals ... legacy systems"). Overlap of
+    :data:`_THEME_OVERLAP_MIN` significant words counts as the same theme.
+    """
+    candidate_words = _theme_words(candidate)
+    if not candidate_words:
+        return False
+    for recent in recent_topics:
+        if len(candidate_words & _theme_words(recent)) >= _THEME_OVERLAP_MIN:
+            return True
+    return False
 
 
 def _is_excluded(topic: str, exclusions: list[str]) -> bool:
@@ -263,8 +367,18 @@ class TopicEngine:
             raise RuntimeError(
                 "Council could not obtain a topic: owner queue empty and no topics proposed."
             )
+        # Prefer a candidate that shares no THEME with a recent topic. Exact-string
+        # matching alone was useless here (a proposer never repeats a topic word for
+        # word, it repeats the subject), which is how the feed drifted into the same
+        # territory post after post.
+        for candidate in candidates:
+            if candidate.casefold() not in recent and not _shares_theme(
+                candidate, recent_topics or []
+            ):
+                return candidate
         for candidate in candidates:
             if candidate.casefold() not in recent:
+                logger.info("Every proposed topic echoed a recent theme; taking the freshest.")
                 return candidate
         # Every candidate was a recent repeat — better to reuse than to invent, so
         # take the first proposed candidate.

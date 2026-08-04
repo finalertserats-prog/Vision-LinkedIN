@@ -266,3 +266,19 @@ def test_main_without_the_flag_passes_no_topic(db_session: Session) -> None:
     # Assert: the scheduled path is unchanged.
     assert exit_code == 0
     assert run.call_args.kwargs["topic"] is None
+
+
+def test_main_rejects_unknown_flags_without_running_the_council() -> None:
+    """Bad argv exits 2 (argparse's usage error) and never starts a deliberation."""
+    # Arrange / Act: a typo'd flag must fail BEFORE any model, DB or mail work
+    # begins — a mis-typed one-off should cost nothing, not half a council run.
+    with patch("vision.cli.council.run_council_cli") as run:
+        try:
+            main(["--topik", "oops"])
+            exit_code = 0
+        except SystemExit as exc:  # argparse's usage-error exit, not a crash
+            exit_code = exc.code
+
+    # Assert
+    assert exit_code == 2
+    run.assert_not_called()

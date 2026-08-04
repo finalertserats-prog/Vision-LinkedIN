@@ -26,7 +26,7 @@ from vision.council.diagram import DiagramWriter
 from vision.council.hashtags import HashtagWriter
 from vision.council.formats import RecentFormatStore
 from vision.council.problems import ProblemQueue
-from vision.council.topics import TopicEngine
+from vision.council.topics import RecentTopicStore, TopicEngine
 from vision.council.visual import attach_council_image
 from vision.council.voices import VOICE_ORDER, Voices
 
@@ -48,6 +48,21 @@ def _build_transcript(delib: Deliberation) -> dict[str, dict[str, str]]:
         voice: {"round1": delib.round1.get(voice, ""), "round2": delib.round2.get(voice, "")}
         for voice in VOICE_ORDER
     }
+
+
+def _last_visual_was_diagram(settings: Settings) -> bool:
+    """True when the previous council post's image was a diagram.
+
+    Reads the image ledger directly (a cheap JSON read) so the engine can skip the
+    diagram-writer model call entirely on the post after a diagram. Fail-soft: any
+    ledger problem reads as "not a diagram", which favours ASKING - the visual
+    layer still applies the same no-two-in-a-row guard, so a false negative here
+    costs one model call, never a repeated diagram.
+    """
+    from vision.council.visual import IMAGE_TYPE_DIAGRAM, _CouncilImageLedger
+
+    ledger = _CouncilImageLedger.from_settings(settings)
+    return ledger.last_visual_kind() == IMAGE_TYPE_DIAGRAM
 
 
 def _frame_problem(problem: str) -> str:
@@ -138,8 +153,17 @@ def run_council(
         logger.info("Council running on a seeded PROBLEM: %s", chosen_topic)
         deliberation = deliberator.deliberate(_frame_problem(problem))
     else:
-        chosen_topic = topic if (topic and topic.strip()) else topic_engine.pick_topic()
+        # Steer away from what we have just been posting about. The store is read
+        # here (not inside TopicEngine) so an EXPLICIT --topic never pays for the
+        # lookup and is never second-guessed by variety rules.
+        topic_store = RecentTopicStore.from_settings(settings)
+        chosen_topic = (
+            topic
+            if (topic and topic.strip())
+            else topic_engine.pick_topic(recent_topics=topic_store.recent())
+        )
         logger.info("Council running on topic: %s", chosen_topic)
+        topic_store.remember(chosen_topic)
         deliberation = deliberator.deliberate(chosen_topic)
 
     # 2. Fail-soft per voice, fail-closed on <2 takes (raised inside deliberate()).
@@ -165,12 +189,18 @@ def run_council(
     #     structured output. So when the diagram lane is on and compose produced no
     #     diagram, generate one FROM the finished post (a single-purpose prompt over
     #     the final text). Fail-soft: any miss leaves the post on its fallback image.
+    #     Diagrams are the EXCEPTION now (owner req 2026-08-04): if the previous
+    #     post was a diagram we do not even ASK, which saves a model call and
+    #     guarantees hand-drawn art gets the next turn.
     if settings.council_diagram_enabled and composed.diagram is None:
-        composed.diagram = DiagramWriter(voices=voices, settings=settings).diagram_for(
-            composed.post_text
-        )
-        if composed.diagram is not None:
-            logger.info("Attached an in-sync diagram generated from the post.")
+        if _last_visual_was_diagram(settings):
+            logger.info("Previous post was a diagram; skipping the diagram lane.")
+        else:
+            composed.diagram = DiagramWriter(
+                voices=voices, settings=settings
+            ).diagram_for(composed.post_text)
+            if composed.diagram is not None:
+                logger.info("Attached an in-sync diagram generated from the post.")
 
     # 3.6 HASHTAGS (fallback). The compose prompt asks for 3-5 hashtags but the
     #     composing voice often drops them. When the post carries none, generate

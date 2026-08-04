@@ -70,9 +70,29 @@ VISION_APPROVAL_BASE_URL=https://vision.yourdomain.com
 # SQLite (default) or Postgres:
 DATABASE_URL=sqlite:////opt/vision/vision.db
 # Keep your existing secrets: SECRET_HMAC_KEY, TOKEN_ENC_KEY, EMAIL_*, LI_*, etc.
+# Images MUST live on a shared path, NOT /tmp: every unit sets PrivateTmp=true, so
+# a PNG the council writes to /tmp is invisible to the publisher that must attach it.
+COUNCIL_IMAGE_DIR=/opt/vision/images
+# Diagram lane needs a browser for mermaid. Bundled chrome-headless-shell downloads
+# are unreliable on some hosts; installing google-chrome-stable and pointing
+# puppeteer at it is the sturdier path (see §1).
+PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 # Retention Drive backup (optional, §5):
 # RCLONE_REMOTE=gdrive
 ```
+
+> **Copy `.env` as LF, not CRLF.** A `.env` copied from Windows carries `\r` at
+> the end of every value. Pydantic tolerates it, but systemd's `EnvironmentFile`
+> does NOT — every value arrives with a trailing carriage return and the service
+> dies on enum/bool parsing. Run `sed -i 's/\r$//' /opt/vision/.env` after copying.
+
+> **LinkedIn auth lives in the DATABASE, not `.env`.** The publisher reads an
+> encrypted OAuth token from the `oauth_tokens` table, so a fresh VPS with a fresh
+> DB cannot publish even with a perfect `.env`. Either copy your working
+> `vision.db` across (it carries the token, decryptable with the same
+> `TOKEN_ENC_KEY`) or re-run the LinkedIn authorization on the VPS. Note that
+> `alembic upgrade head` cannot build a fresh DB from scratch today — one revision
+> autoloads `oauth_tokens` before it exists — so copying the DB is the working path.
 
 > `.env` is loaded by the app from an **absolute path**, so it is found no matter
 > what working directory systemd uses. Keep it `chmod 600`, owned by `vision`.
