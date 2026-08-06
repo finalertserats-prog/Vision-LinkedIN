@@ -1,0 +1,53 @@
+[Unit]
+# Early-warning lane health (BRD §17). Runs Brahmastra's own godmode-mesh-health.sh
+# — a REAL round-trip probe of all three AI CLIs — and alerts if any lane is down,
+# 30 minutes before the council needs them.
+#
+# WHY (incident 2026-08-06): the council deliberated for two minutes against an
+# expired Claude OAuth token and then died in the composer. Brahmastra was already
+# installed on this box with a health checker; nothing ever ran it on a schedule,
+# and it hardcoded the Claude lane as healthy anyway. Both halves are fixed; this
+# unit is what actually asks the question, early enough to act on the answer.
+#
+# IMPORTANT (auth): like vision-council, this shells out to the Brahmastra CLIs,
+# which read AND refresh their OAuth tokens in $HOME. ProtectSystem=full keeps
+# system dirs read-only while leaving /opt and $HOME writable; ProtectSystem=strict
+# or ProtectHome=true would break token refresh and make the probe report false
+# outages — a health check that breaks the thing it measures.
+Description=VISION AI lane preflight (Brahmastra mesh health + alert)
+After=network-online.target postgresql.service
+Wants=network-online.target
+# The preflight reports lane outages by email itself and exits 0 for them, so a
+# failed unit here means the JOB broke, not that a lane is down — worth its own
+# alert, and it cannot loop because the handler never fails.
+OnFailure=vision-job-failed@%n.service
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+EnvironmentFile=/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-preflight
+
+# Three CLI round-trips (90s claude + 90s gemini + 180s codex worst case) plus
+# one email. Lighter than the council: no image generation, no composition.
+OOMScoreAdjust=-500
+MemoryMax=768M
+MemorySwapMax=0
+# Comfortably past the probe budget the preflight itself bounds at 420s, so the
+# unit never kills a probe that is about to return a useful answer.
+TimeoutStartSec=600
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+StandardOutput=append:/opt/vision/logs/vision-preflight.log
+StandardError=append:/opt/vision/logs/vision-preflight.log
+
+# NO [Install] section, deliberately — enable vision-preflight.TIMER, never this
+# service. A WantedBy=multi-user.target here would make `systemctl enable
+# vision-preflight.service` fire the probe at every boot, which is exactly wrong
+# for a check whose only value is the half hour before the council runs. Omitting
+# the section makes that mistake fail loudly instead of quietly mis-scheduling.

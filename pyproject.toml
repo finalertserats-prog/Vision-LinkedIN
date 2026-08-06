@@ -68,6 +68,8 @@ vision-token = "vision.publish.token_refresh:main"  # FR-17: daily proactive OAu
 vision-expire = "vision.cli.expire:main"  # FR-16: cron at cutoff (default 20:00 IST) auto-expires un-actioned drafts
 vision-canary = "vision.ops.canary:main"  # §17/NFR-08: external health canary — pings /healthz, alerts + exits non-zero on failure
 vision-retention = "vision.cli.retention:main"  # §22.9: weekly archive -> rclone Drive backup -> verify -> prune + VACUUM (fail-closed)
+vision-alert-failure = "vision.ops.job_failure:main"  # §17/NFR-08: systemd OnFailure= handler — a failed unit reports itself (with its log tail) instead of dying silently
+vision-preflight = "vision.ops.preflight:main"  # §17: early-warning lane health via Brahmastra mesh-health, ahead of the council's content run
 
 [tool.setuptools.packages.find]
 # Discover the `vision` package (and subpackages) under src/ only.

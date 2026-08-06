@@ -125,6 +125,13 @@ class Settings(BaseSettings):
     brahmastra_council_dir: Path = Field(
         default=Path("~/.claude/council").expanduser(), alias="BRAHMASTRA_COUNCIL_DIR"
     )
+    # Brahmastra's script dir — home of godmode-mesh-health.sh, the lane health
+    # check VISION's preflight runs before the council (§17). Separate from the
+    # council dir because the two live side by side under ~/.claude and a
+    # deployment may relocate either independently (§22.6 config over code).
+    brahmastra_scripts_dir: Path = Field(
+        default=Path("~/.claude/scripts").expanduser(), alias="BRAHMASTRA_SCRIPTS_DIR"
+    )
     # Lane names routed onto the CLI scripts for the three synthesis passes (§13.1).
     model_generate: str = Field(default="gemini", alias="MODEL_GENERATE")
     model_critique: str = Field(default="codex", alias="MODEL_CRITIQUE")

@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 import yaml
 
 # Repo root: tests/ lives directly under it.
@@ -315,3 +316,94 @@ def test_web_service_has_no_watchdog_without_sd_notify() -> None:
     # Assert: no watchdog directive, but the active restart guard is intact.
     assert "WatchdogSec" not in text, "remove WatchdogSec — uvicorn does not sd_notify"
     assert "Restart=always" in text
+
+
+# ---------------------------------------------------------------------------
+# deploy/systemd — a failed job must report itself (incident 2026-08-06)
+# ---------------------------------------------------------------------------
+# On 2026-08-06 vision-council.service crashed, fail-closed correctly, exited
+# non-zero, and systemd marked it `failed` — and told nobody. The only symptom
+# the owner saw was a missing approval email. Every job now points OnFailure= at
+# the vision-job-failed@ template, and these tests keep it that way: a new unit
+# that forgets the line is a unit that can die in silence.
+_UNITS_THAT_MUST_ALERT_ON_FAILURE = (
+    "vision-council",
+    "vision-preflight",
+    "vision-daily",
+    "vision-expire",
+    "vision-publisher",
+    "vision-token",
+    "vision-retention",
+    "vision-web",
+)
+
+
+@pytest.mark.parametrize("role", _UNITS_THAT_MUST_ALERT_ON_FAILURE)
+def test_every_job_unit_reports_its_failure_to_the_owner(role: str) -> None:
+    # Arrange: read the unit as shipped.
+    text = (SYSTEMD_DIR / f"{role}.service").read_text(encoding="utf-8")
+
+    # Assert: OnFailure= points at the shared handler, instanced with %n so the
+    # handler knows which unit died (and which log to attach).
+    assert "OnFailure=vision-job-failed@%n.service" in text, (
+        f"{role}.service can fail silently — wire OnFailure=vision-job-failed@%n.service"
+    )
+
+
+def test_failure_handler_unit_exists_and_is_declared_in_the_unit_section() -> None:
+    # Arrange: OnFailure= is only honoured in [Unit]; placing it under [Service]
+    # is silently ignored — the same class of bug as the RestartSec/StartLimit
+    # split guarded above.
+    handler = SYSTEMD_DIR / "vision-job-failed@.service"
+    assert handler.exists(), "missing deploy/systemd/vision-job-failed@.service"
+
+    council = (SYSTEMD_DIR / "vision-council.service").read_text(encoding="utf-8")
+    unit_section = council.split("[Service]", 1)[0]
+
+    # Assert: the directive sits in [Unit], where systemd actually reads it.
+    assert "OnFailure=" in unit_section
+
+
+def test_failure_handler_does_not_alert_on_its_own_failure() -> None:
+    # Arrange: a handler that points OnFailure= at itself (or at another handler)
+    # is an alert loop — the one shape this whole mechanism must not take.
+    text = (SYSTEMD_DIR / "vision-job-failed@.service").read_text(encoding="utf-8")
+
+    # Assert: no OnFailure= directive of its own (comments mentioning it are fine).
+    assert not re.search(r"(?m)^OnFailure=", text)
+
+
+def test_deploy_arms_the_lane_preflight_timer() -> None:
+    # Arrange: a preflight timer that ships but is never enabled reports nothing —
+    # exactly how Brahmastra's own health checker sat unscheduled on the VPS while
+    # the 2026-08-06 outage ran unseen. Shipping the unit is not arming it.
+    text = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    # Assert: the deploy actively enables it, like the fail-closed expiry timer.
+    assert re.search(r"enable\b.*vision-preflight\.timer", text), (
+        "deploy.sh must enable vision-preflight.timer"
+    )
+
+
+def test_preflight_ships_both_a_service_and_a_timer() -> None:
+    # Arrange/Act: the preflight only has value on a schedule.
+    present = {p.name for p in SYSTEMD_DIR.iterdir()}
+
+    # Assert.
+    assert "vision-preflight.service" in present
+    assert "vision-preflight.timer" in present
+
+
+def test_preflight_runs_before_the_council() -> None:
+    # Arrange: the entire point of the preflight is the GAP — a dead lane must be
+    # reported while there is still time to re-authenticate before the content run.
+    preflight = (SYSTEMD_DIR / "vision-preflight.timer").read_text(encoding="utf-8")
+    council = (SYSTEMD_DIR / "vision-council.timer").read_text(encoding="utf-8")
+
+    def hhmm(text: str) -> tuple[int, int]:
+        m = re.search(r"OnCalendar=\*-\*-\* (\d{2}):(\d{2})", text)
+        assert m, "timer must declare an OnCalendar slot"
+        return int(m.group(1)), int(m.group(2))
+
+    # Assert: strictly earlier in the same (Asia/Kolkata) wall clock.
+    assert hhmm(preflight) < hhmm(council)

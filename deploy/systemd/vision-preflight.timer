@@ -1,0 +1,17 @@
+[Unit]
+Description=Fire VISION lane preflight at 07:30 IST (30 min before the council)
+
+[Timer]
+# 07:30 Asia/Kolkata — deliberately 30 minutes AHEAD of vision-council.timer's
+# 08:00 slot. The gap is the whole point: a dead lane (an expired CLI token, most
+# likely) is reported while there is still time to re-authenticate before the
+# day's content run, instead of being discovered by the run itself failing.
+OnCalendar=*-*-* 07:30:00 Asia/Kolkata
+# Persistent=false on purpose. A preflight is only meaningful in the half hour
+# before the council; replaying a missed one after a reboot would report lane
+# health for a window that has already passed and alert about stale news.
+Persistent=false
+Unit=vision-preflight.service
+
+[Install]
+WantedBy=timers.target

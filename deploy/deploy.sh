@@ -55,6 +55,13 @@ echo "=== Ensuring the fail-closed expiry timer is armed (BRD §22.9) ==="
 systemctl enable --now vision-expire.timer
 echo "    vision-expire.timer enabled and started"
 
+# The lane preflight is armed the same way, and for the mirror-image reason: a
+# timer that exists but was never enabled reports nothing, which is precisely the
+# failure mode that let the 2026-08-06 outage run unseen (Brahmastra's own health
+# checker was installed on the box and scheduled by nothing at all).
+systemctl enable --now vision-preflight.timer
+echo "    vision-preflight.timer enabled and started"
+
 echo "=== Restarting always-on web service (only if already active) ==="
 # is-active guard: never *start* a service the operator had deliberately stopped;
 # only restart what is currently running (matches finalert's safety check).

@@ -12,6 +12,17 @@ Wants=network-online.target
 # trips the rate limiter and surfaces the failure instead of hammering restarts.
 StartLimitIntervalSec=600
 StartLimitBurst=5
+# Report a failed run to the owner (incident 2026-08-06: a crashed job left the
+# unit in `failed` state and told nobody — the only symptom was a missing email).
+# %n expands to this unit's full name, which becomes the handler's instance.
+#
+# For THIS unit (Restart=always) that means the alert fires when the start limit
+# above is exhausted — i.e. the web tier is genuinely down — NOT on each transient
+# crash that Restart= successfully absorbs. That is the intent: a self-healed
+# restart is not an incident, and alerting on every one would bury the case that
+# actually needs a human. Per-restart visibility, if ever wanted, belongs in the
+# canary, not here.
+OnFailure=vision-job-failed@%n.service
 
 [Service]
 Type=simple

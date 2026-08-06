@@ -8,6 +8,10 @@
 Description=VISION fail-closed draft expiry (un-actioned => expire, never post)
 After=network-online.target postgresql.service
 Wants=network-online.target
+# Report a failed run to the owner (incident 2026-08-06: a crashed job left the
+# unit in `failed` state and told nobody — the only symptom was a missing email).
+# %n expands to this unit's full name, which becomes the handler's instance.
+OnFailure=vision-job-failed@%n.service
 
 [Service]
 Type=oneshot

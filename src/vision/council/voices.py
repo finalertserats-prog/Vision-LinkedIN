@@ -59,6 +59,73 @@ _DEFAULT_TIMEOUT = 180.0
 # <script-specific flags>) — do NOT reword; they are part of the proven path.
 _SCRIPT_TRAILING_ARGS = ("default", "1", "25")
 
+# --- CLI-diagnostic detection ------------------------------------------------
+# WHY this exists (incident 2026-08-06): the Claude CLI's OAuth token expired on
+# the VPS. It printed "Failed to authenticate. API Error: 401 OAuth access token
+# has expired." to STDOUT and exited — and because :meth:`ask` gates on "stdout is
+# non-empty", that sentence travelled upstream AS THE MODEL'S ANSWER. It became
+# the day's topic, then failed the composer three attempts later under the
+# misleading label "parse miss". The run fail-closed correctly but never named the
+# real fault, so the only symptom the owner saw was a missing email.
+#
+# A CLI diagnostic is not content. Detecting it here — at the ONE seam every voice
+# flows through — turns a dead lane into a dead lane (``""``, fail-soft, the
+# council degrades to its surviving voices) instead of poisoned input.
+
+# Only output SHORTER than this is eligible to be judged a diagnostic. This is the
+# false-positive guard, and it is the load-bearing half of the rule: CLI errors are
+# terse one-liners (the incident's was 99 chars; the codex sandbox refusal 76) while
+# a real council answer runs to hundreds or thousands — the composer alone demands
+# 700+. Without the ceiling, a legitimate post ABOUT expired OAuth tokens would be
+# silently discarded as a dead lane, a far worse failure than the one being fixed.
+# 400 rather than a looser bound keeps that false-positive window as narrow as the
+# real diagnostics allow.
+_MAX_CLI_ERROR_CHARS = 400
+
+# Lowercased substrings that only ever appear in a CLI's own error output, never in
+# a model's prose answer. Kept deliberately narrow: each one is a phrase a tool
+# prints about ITSELF (auth state, sandbox refusal, launch failure, throttling).
+# Where a phrase is ordinary English on its own, the PUNCTUATED form the tool
+# actually emits is used instead — ": command not found" is the shell's literal
+# output shape, whereas a bare "command not found" is a thing prose can say.
+_CLI_ERROR_SIGNATURES: tuple[str, ...] = (
+    "failed to authenticate",
+    "api error:",
+    "access token has expired",
+    "access token has been revoked",
+    "re-authenticate to continue",
+    "invalid api key",
+    "please run /login",
+    "not inside a trusted directory",
+    ": command not found",
+    "rate limited.",
+    "429 too many requests",
+)
+
+
+def detect_cli_error(text: str) -> str | None:
+    """Return the matched diagnostic signature in ``text``, or ``None``.
+
+    A pure predicate (no I/O, no logging) so the rule is unit-testable on its own
+    and the transport in :meth:`Voices.ask` stays a thin wrapper around it.
+
+    ``text`` is judged a CLI diagnostic only when it is BOTH short (see
+    :data:`_MAX_CLI_ERROR_CHARS`) and contains a known signature. Requiring both
+    is what lets a long, genuine answer that happens to *discuss* token expiry
+    through untouched — the guard must never eat real content.
+
+    Empty/whitespace output returns ``None``: that is already handled as its own
+    case by the caller ("voice returned empty output") and is not a diagnostic.
+    """
+    candidate = text.strip()
+    if not candidate or len(candidate) > _MAX_CLI_ERROR_CHARS:
+        return None
+    lowered = candidate.lower()
+    for signature in _CLI_ERROR_SIGNATURES:
+        if signature in lowered:
+            return signature
+    return None
+
 
 class Voices:
     """The three headless voices with a uniform ``ask(voice, prompt) -> str``.
@@ -177,4 +244,27 @@ class Voices:
         text = completed.stdout.decode("utf-8", "ignore").replace("\x00", "").strip()
         if not text:
             logger.warning("Council voice %s returned empty output.", voice)
+            return text
+
+        # A CLI that printed its OWN diagnostic (expired auth, sandbox refusal,
+        # missing binary) is a DEAD LANE, not an answer — see the incident note on
+        # _CLI_ERROR_SIGNATURES. Fail soft like every other voice failure so the
+        # council degrades to its surviving voices, but log at ERROR with the
+        # matched signature: the whole point is that the cause is now visible in the
+        # log instead of surfacing three layers up as a bogus "parse miss".
+        signature = detect_cli_error(text)
+        if signature is not None:
+            # The message stays neutral about the CAUSE: the signature list spans
+            # expired auth, a missing binary, a sandbox refusal and throttling, so
+            # naming any one of them would point whoever reads this the wrong way.
+            # The matched signature is included — that is the actual diagnosis.
+            logger.error(
+                "Council voice %s returned a CLI diagnostic, not an answer; "
+                "treating the lane as dead (matched: %r). The lane's CLI needs "
+                "operator attention.",
+                voice,
+                signature,
+            )
+            return ""
+
         return text

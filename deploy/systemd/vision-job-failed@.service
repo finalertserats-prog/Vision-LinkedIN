@@ -1,0 +1,63 @@
+[Unit]
+# Generic failure reporter for every VISION job (BRD §17 / NFR-08).
+#
+# WHY this unit exists (incident 2026-08-06): vision-council.service crashed at
+# 02:30 UTC when a shelled-out CLI's OAuth token expired. Everything fail-closed
+# correctly and systemd marked the unit `failed` — and then the chain stopped
+# dead. Nobody was told. The only symptom the owner ever saw was that the morning
+# approval email did not arrive, and the cause needed a manual log read to find.
+#
+# This is the template every job points `OnFailure=` at. systemd substitutes the
+# failed unit's name as the instance (`%n`), the handler reads that unit's own
+# log tail, and the owner gets an alert with the traceback already in the body.
+#
+# Instance name note: callers use `OnFailure=vision-job-failed@%n.service`, so %i
+# here is the FULL failed unit name including its `.service` suffix (e.g.
+# `vision-council.service`) — that is the documented systemd idiom and exactly
+# what `vision-alert-failure` expects as its argument.
+Description=VISION failure alert for %i
+# postgresql: the alerter's dedup state lives in the DB (alert_state), so during
+# a boot transaction this orders the handler after Postgres rather than racing it.
+#
+# This is ORDERING ONLY — deliberately no Requires=/BindsTo=. A dead Postgres must
+# never be able to hold back a failure alert, and After= alone cannot: it applies
+# when both units are in the same start job, not when the dependency is simply
+# down. The delivery path is safe either way — DbAlertDedupStore is fail-OPEN
+# (a read/write error is logged and treated as "not yet fired") and the email
+# channel touches no database, so losing the DB costs SUPPRESSION, not the alert.
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=vision
+Group=vision
+WorkingDirectory=/opt/vision
+# Leading '-': OPTIONAL. Every other unit hard-requires the .env, but this one
+# must not — systemd fails a unit BEFORE ExecStart when a mandatory
+# EnvironmentFile is missing or malformed (the CRLF trap in DEPLOY.md), which
+# would make the one job whose whole purpose is "never fail silently" do exactly
+# that. Without the file the handler still runs and still logs; a missing .env
+# costs a degraded alert, not a lost one.
+EnvironmentFile=-/opt/vision/.env
+ExecStart=/opt/vision/venv/bin/vision-alert-failure %i
+
+# Tiny job: read a log tail, send one email. Bounded hard so the thing that
+# reports a failure can never itself become a memory problem on a sick box.
+MemoryMax=256M
+MemorySwapMax=0
+# One email over SMTP plus a DB round-trip for dedup state. If it cannot finish
+# in a minute the box has bigger problems than this alert.
+TimeoutStartSec=60
+
+# Deliberately NO OnFailure= of its own: a failure handler that alerts on its own
+# failure is an alert loop. `vision-alert-failure` always exits 0 for the same
+# reason; a genuine problem here surfaces in the log, not in a second unit.
+
+NoNewPrivileges=true
+PrivateTmp=true
+# ProtectSystem=full (not strict): matches the other units so /opt stays writable.
+ProtectSystem=full
+
+StandardOutput=append:/opt/vision/logs/vision-job-failed.log
+StandardError=append:/opt/vision/logs/vision-job-failed.log

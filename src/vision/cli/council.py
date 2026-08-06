@@ -67,6 +67,7 @@ from vision.db.session import get_session
 from vision.logging_setup import configure_logging, get_logger
 from vision.mailer.composer import compose_approval_email, inline_image_for
 from vision.mailer.sender import EmailSender
+from vision.ops.preflight import preflight
 
 logger = get_logger("vision.cli.council")
 
@@ -393,6 +394,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = get_settings()
     mode = settings.vision_env
     logger.info("vision-council invoked", extra={"env": mode.value})
+
+    # PREFLIGHT (incident 2026-08-06). Ask Brahmastra whether the lanes are alive
+    # BEFORE spending model time. That day the run deliberated for two minutes
+    # against an expired Claude token, then died in the composer — and the auth
+    # error had already been silently adopted as the day's topic.
+    #
+    # Only a dead COMPOSER lane blocks: without Claude the run has exactly one
+    # possible ending. A dead peer lane still leaves a genuine deliberation, so it
+    # proceeds (the preflight job alerts about it separately). An indeterminate
+    # preflight also proceeds — a broken health check must never be the reason a
+    # post did not happen.
+    health = preflight(settings)
+    if health.should_block:
+        # Non-zero exit, and NO alert raised from here: the failed unit trips
+        # OnFailure=, which mails the owner this log tail (carrying the lane
+        # reason below). The gate deliberately does not alert on its own.
+        #
+        # The owner may still see TWO messages for one dead-Claude morning — the
+        # 07:30 preflight job's "lane down, act now" and this 08:00 "the council
+        # did not run". That is intentional: they are different facts, half an
+        # hour apart, and the second one is the consequence the first one warned
+        # about. Collapsing them would mean either losing the early warning or
+        # letting a skipped content day pass unannounced.
+        logger.error(
+            "vision-council blocked by preflight: the composing lane is down",
+            extra={"lane_health": health.summary()},
+        )
+        return 1
+    if health.should_alert:
+        logger.warning(
+            "vision-council proceeding with a degraded council",
+            extra={"lane_health": health.summary()},
+        )
 
     try:
         with get_session() as session:
