@@ -438,3 +438,66 @@ def test_a_status_file_refreshed_by_this_run_is_trusted(
 
     assert not result.indeterminate
     assert result.should_block
+
+
+# --- shared Brahmastra core: the probe must write where we read -------------
+
+
+def test_health_script_runs_with_home_pointed_at_the_brahmastra_core(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mesh-health writes to $HOME/.claude/state — so HOME decides where.
+
+    Under a SHARED core (/opt/brahmastra/.claude) the service user's real HOME is
+    /home/<app>, so the script would write its status to the app's private state
+    dir while we read the shared one — and every run would look stale. Scoping
+    HOME to the core for THIS subprocess (not the whole service) makes the probe
+    write exactly where the status is read from.
+    """
+    import subprocess
+
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    from vision.ops.preflight import run_mesh_health
+
+    core = tmp_path / "brahmastra"
+    scripts = core / ".claude" / "scripts"
+    run_mesh_health(
+        script=scripts / "mesh.sh",
+        status_file=core / ".claude" / "state" / "mesh-status.json",
+        brahmastra_home=core,
+    )
+
+    env = captured.get("env")
+    assert isinstance(env, dict)
+    assert env["HOME"] == str(core)
+    # The rest of the environment must survive — PATH especially, or the script
+    # cannot find the CLIs it is meant to probe.
+    assert "PATH" in env
+
+
+def test_health_script_inherits_the_ambient_home_when_no_core_is_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-user installs keep working untouched — no env override at all."""
+    import subprocess
+
+    captured: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    from vision.ops.preflight import run_mesh_health
+
+    run_mesh_health(script=tmp_path / "mesh.sh", status_file=tmp_path / "s.json")
+
+    assert captured.get("env") is None

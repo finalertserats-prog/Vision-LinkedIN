@@ -29,6 +29,7 @@ Two fail-safe rules shape the rest of the design:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from collections.abc import Sequence
@@ -155,6 +156,7 @@ def run_mesh_health(
     *,
     script: Path,
     status_file: Path,
+    brahmastra_home: Path | None = None,
     timeout: float = _HEALTH_TIMEOUT_SECS,
     bash_executable: str = "bash",
 ) -> PreflightResult:
@@ -173,9 +175,23 @@ def run_mesh_health(
     # wrote this just now" from "this is left over from a previous run".
     started_at = time.time()
 
+    # mesh-health resolves its own state dir as "$HOME/.claude/state". With a
+    # SHARED Brahmastra core the service user's real HOME is /home/<app>, so the
+    # script would write its status into the app's private state while we read
+    # the shared one — every run then looks stale and the preflight is
+    # permanently indeterminate (observed on the VPS the moment VISION was
+    # pointed at /opt/brahmastra). Overriding HOME for THIS SUBPROCESS ONLY —
+    # not the unit, not the app — makes the probe write exactly where we read.
+    # The rest of the environment is inherited, PATH above all, or the script
+    # cannot find the CLIs it exists to probe.
+    env = None
+    if brahmastra_home is not None:
+        env = {**os.environ, "HOME": str(brahmastra_home)}
+
     try:
         subprocess.run(
             [bash_executable, str(script)],
+            env=env,
             # DEVNULL, not capture_output: nothing reads this output (the status
             # file is the interface), and a CLI in a retry storm can emit a lot of
             # diagnostics we would otherwise buffer in memory for nothing.
@@ -253,11 +269,15 @@ def preflight(settings: Settings | None = None) -> PreflightResult:
 
     scripts_dir = Path(settings.brahmastra_scripts_dir).expanduser()
     # mesh-health writes its status next to the other Brahmastra state, which
-    # sits at ~/.claude/state — a sibling of the scripts dir.
+    # sits at <core>/.claude/state — a sibling of the scripts dir.
     state_dir = scripts_dir.parent / "state"
+    # The core is the parent of the .claude dir, i.e. what HOME must look like to
+    # the script (~/.claude/... then resolves to the shared install). For a
+    # per-user layout this is simply the user's home and the override is a no-op.
     return run_mesh_health(
         script=scripts_dir / _SCRIPT_FILENAME,
         status_file=state_dir / _STATUS_FILENAME,
+        brahmastra_home=scripts_dir.parent.parent,
     )
 
 
