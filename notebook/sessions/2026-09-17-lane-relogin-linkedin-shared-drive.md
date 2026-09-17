@@ -35,7 +35,19 @@
   - Verified with an upload plus `check --one-way` as `vision` under systemd; the token refresh rewrote the file and the watcher restored `660`.
 - **All three copies match.** Local, GitHub and the VPS are on `3cf44e2`, with no unit drift and no failed units. `deploy/DEPLOY.md` §5 documents how to rebuild the Drive setup.
 
+- **End-of-day verification (after the first session-end):**
+  - **Dry run:** a council run with `VISION_ENV=dry_run`, launched via systemd-run with a wrapper script that exports it, and an explicit `--topic` so no queue item was consumed.
+    - All 3 voices took part, a diagram image was attached, and the approval email was suppressed.
+    - `vision-publisher` and `vision-token` were also dry-run: 0 drafts due, and the LinkedIn token reported healthy.
+  - **Dry-run draft `ac560bbb` rejected.** It was moved `pending_approval -> rejected` through `vision.approval.state_machine.transition` (actor owner, audited), not a row delete. It was the only pending draft.
+  - **Final live test:**
+    - `systemctl start vision-council.service` took the topic from the queue (private equity and nursing homes), attached an art image, and sent the approval email.
+    - The owner approved from the email.
+    - The publisher posted at 15:15:32 UTC: `urn:li:share:7506370262838431744`, followed by the "post is live" email.
+    - The whole daily loop is proven end to end, and the schedule takes over from 2026-09-18.
+
 ## Key Decisions Made
+- **Reject the dry-run draft; don't delete the row.** REJECTED is terminal, so the draft can never be approved or published, and the audit trail and foreign keys stay intact.
 - **Watch the rewrite (path unit), not a schedule or `ExecStartPre`.** The one-off chmod held five weeks, then silently regressed. The watcher also covers every app on the box, not just VISION's runs.
 - **Harden the root chmod.** The directories are group-writable, so a symlink swap could have made root chmod `/etc/shadow`. Guarded by `find -P` plus a sandbox (a Codex review finding).
 - **Enable `vision-token` rather than building a new reminder.** The job already emails a re-auth alert in the final 7 days when no refresh token exists. It was simply never armed.
@@ -60,7 +72,11 @@
   - It raised the symlink-hardening finding, which was applied.
   - Its remaining findings were assessed and rejected with reasons: the deploy fail-closed behaviour is deliberate, and the unescaped parens in `ExecStart` were verified to work on the box.
 
+- **The dry run's diagram used up the diagram cooldown** ("0 of 4 posts"), so the next 4 real posts will use art. That's harmless and fits the art-first rule, but a dry run should ideally not touch the visual-variety state.
+- **First scheduled run:** 2026-09-18, preflight at 02:00 UTC and council at 02:30 UTC. Confirm the approval email arrives.
+
 ## Patterns Learned
+- **A council dry run still writes real state.** It stores a `pending_approval` draft (visible in the web approval UI) and advances the diagram cooldown. Afterwards, reject the draft through the state machine.
 - **`deploy.sh` runs the OLD copy of itself** on the pass that pulls a new version. `git pull` first, or run it twice.
 - **Extracting a token from tmux:** never `tr -d "\n"` before grepping, because the next line gets glued on (130 chars instead of 108, giving 401 invalid).
   - Grep per line on `capture-pane -J`.
