@@ -2,11 +2,13 @@
 
 Unlike ``spikes/spike_linkedin.py`` (a throwaway probe that discards its tokens),
 this stores the encrypted access + refresh tokens in the database so the daily
-pipeline (``vision-publisher``) can publish on your behalf. Run it ONCE; re-run
-only if a re-authorisation is ever required (the tokens last ~1 year).
+pipeline (``vision-publisher``) can publish on your behalf. Re-run it when the
+re-authorisation reminder arrives: LinkedIn gives this app a ~60-day access token
+and NO refresh token, so it cannot renew itself. ``vision-token`` emails a
+reminder daily during the final week.
 
-Usage:
-    .venv\\Scripts\\python scripts\\authorize_linkedin.py
+Usage (on the VPS, where the DB lives):
+    cd /opt/vision && sudo -u vision venv/bin/python scripts/authorize_linkedin.py
 
 It prints a consent URL; open it, click Allow, then paste the FULL redirected
 ``http://localhost:8000/...?code=...&state=...`` URL back at the prompt.

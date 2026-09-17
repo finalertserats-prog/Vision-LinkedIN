@@ -546,6 +546,11 @@ def _do_locked_refresh(
     )
     if refresh_unusable:
         reason = "refresh token missing or near expiry"
+        # LinkedIn issues this app no refresh token, so this alert is really a
+        # countdown; the owner needs the deadline, not just "re-authorise".
+        access_expiry = _as_utc(token.access_expires_at)
+        if access_expiry is not None:
+            reason += f"; access token expires {access_expiry:%Y-%m-%d %H:%M} UTC"
         _log.warning("cannot refresh account %s: %s", account_id, reason)
         _send_reauth_alert(sender, settings, account_id, reason)
         _audit(session, account_id, "reauth_alert", reason, now)

@@ -281,6 +281,32 @@ def test_refresh_token_near_expiry_alerts_without_calling_linkedin(
     sender.send.assert_called_once()
 
 
+def test_reauth_reminder_states_when_the_access_token_expires(
+    db_session: Session, settings: Settings, tmp_path: Path
+) -> None:
+    # Arrange: LinkedIn issues this app no refresh token, so the only defence
+    # against a 401 on publish day is telling the owner the deadline in advance
+    # (incident 2026-09-17: an approved post bounced on an expired token).
+    token = _seed_token(
+        db_session,
+        access_expires_at=_NOW + timedelta(days=3),
+        refresh_expires_at=None,
+    )
+    token.refresh_token_enc = None
+    db_session.flush()
+    sender = Mock()
+
+    # Act.
+    refresh_if_needed(
+        db_session, _NOW, settings=settings, client=_StubLinkedInClient({}),
+        sender=sender, lock_dir=tmp_path,
+    )
+
+    # Assert: the email body names the exact expiry moment.
+    body = sender.send.call_args.args[1]
+    assert "2026-07-09 12:00 UTC" in body
+
+
 # --- Transient errors retry then dead-letter -------------------------------
 
 

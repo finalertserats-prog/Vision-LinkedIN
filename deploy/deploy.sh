@@ -62,6 +62,12 @@ echo "    vision-expire.timer enabled and started"
 systemctl enable --now vision-preflight.timer
 echo "    vision-preflight.timer enabled and started"
 
+# The token job is the only warning before the LinkedIn access token dies (no
+# refresh token is issued), and it sat disabled until an approved post bounced
+# with a 401 on 2026-09-17. Armed on every deploy for the same reason as above.
+systemctl enable --now vision-token.timer
+echo "    vision-token.timer enabled and started"
+
 # Codex rewrites the shared config as 0600, which locks every app user out of the
 # codex lane (2026-08-06, 2026-09-17). The path unit re-opens it on each rewrite;
 # the explicit start repairs a file that was already broken before the watch began.
