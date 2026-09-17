@@ -1,0 +1,19 @@
+[Unit]
+# Re-opens the shared Codex config to the brahmastra group every time it changes.
+#
+# WHY (incidents 2026-08-06 and 2026-09-17): codex rewrites config.toml as mode
+# 0600, and a root-run codex on this box (another app sharing the core) leaves it
+# root:600. The ACL mask then drops to ---, the brahmastra group ACL stops
+# applying, and every app user's codex dies with "Permission denied" before any
+# network call. A one-off chmod held for five weeks and then silently regressed,
+# so the fix has to fire on the rewrite itself, not on a schedule.
+Description=Keep the shared Codex config group-readable (Brahmastra core)
+
+[Path]
+# PathChanged also catches codex's write-to-temp-then-rename, because systemd
+# watches the parent directory for the name reappearing.
+PathChanged=/opt/brahmastra/.codex/config.toml
+Unit=brahmastra-codex-perms.service
+
+[Install]
+WantedBy=multi-user.target

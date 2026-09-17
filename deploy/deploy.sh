@@ -40,7 +40,7 @@ echo "=== Installing systemd unit files ==="
 # success. Installing here keeps the units authoritative from the working copy.
 SYSTEMD_SRC="${VISION_HOME}/deploy/systemd"
 SYSTEMD_DEST="/etc/systemd/system"
-install -m 0644 "${SYSTEMD_SRC}"/*.service "${SYSTEMD_SRC}"/*.timer "${SYSTEMD_DEST}/"
+install -m 0644 "${SYSTEMD_SRC}"/*.service "${SYSTEMD_SRC}"/*.timer "${SYSTEMD_SRC}"/*.path "${SYSTEMD_DEST}/"
 
 echo "=== Reloading systemd unit definitions ==="
 # Picks up the .service/.timer files just copied into /etc/systemd/system.
@@ -61,6 +61,13 @@ echo "    vision-expire.timer enabled and started"
 # checker was installed on the box and scheduled by nothing at all).
 systemctl enable --now vision-preflight.timer
 echo "    vision-preflight.timer enabled and started"
+
+# Codex rewrites the shared config as 0600, which locks every app user out of the
+# codex lane (2026-08-06, 2026-09-17). The path unit re-opens it on each rewrite;
+# the explicit start repairs a file that was already broken before the watch began.
+systemctl enable --now brahmastra-codex-perms.path
+systemctl start brahmastra-codex-perms.service
+echo "    brahmastra-codex-perms.path enabled; config permissions repaired once"
 
 echo "=== Restarting always-on web service (only if already active) ==="
 # is-active guard: never *start* a service the operator had deliberately stopped;
