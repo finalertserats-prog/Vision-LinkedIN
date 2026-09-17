@@ -1,0 +1,22 @@
+[Unit]
+# Re-opens the shared Brahmastra credential files to the brahmastra group every
+# time they change. Every app on this box runs as its own user in that group.
+#
+# WHY (incidents 2026-08-06 and 2026-09-17): codex rewrites its config.toml as
+# 0600, and a root-run codex (another app sharing the core) leaves it root:600.
+# The ACL mask then drops to ---, the brahmastra group ACL stops applying, and
+# every app user's codex dies with "Permission denied" before any network call.
+# A one-off chmod held for five weeks and then silently regressed, so the fix has
+# to fire on the rewrite itself, not on a schedule. rclone does the same thing
+# to the shared Google Drive config each time it refreshes its OAuth token.
+Description=Keep shared Brahmastra credential files group-accessible
+
+[Path]
+# PathChanged also catches write-to-temp-then-rename, because systemd watches
+# the parent directory for the name reappearing.
+PathChanged=/opt/brahmastra/.codex/config.toml
+PathChanged=/opt/brahmastra/.config/rclone/rclone.conf
+Unit=brahmastra-shared-perms.service
+
+[Install]
+WantedBy=multi-user.target

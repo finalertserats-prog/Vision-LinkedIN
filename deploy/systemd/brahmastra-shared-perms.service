@@ -1,0 +1,25 @@
+[Unit]
+# Triggered by brahmastra-shared-perms.path; see that file for the incident history.
+Description=Restore group access on shared Brahmastra credential files
+
+[Service]
+Type=oneshot
+# Runs as root: the files are often root-owned after a root process rewrote them.
+# chmod 660 also resets the ACL mask to rw-, which is what re-enables the
+# brahmastra group ACL. Group write matters for rclone: whichever app refreshes
+# the Drive token must be able to rewrite the file.
+#
+# The directories are group-writable, so a group member could swap a file for a
+# symlink to e.g. /etc/shadow and have root chmod the target. Two guards:
+# find -P -type f skips symlinks, and the sandbox below makes everything outside
+# these two directories read-only, so even a race past find cannot chmod it.
+# A missing file (fresh core) simply matches nothing.
+ExecStart=/usr/bin/find -P /opt/brahmastra/.codex /opt/brahmastra/.config/rclone -maxdepth 1 -type f ( -path /opt/brahmastra/.codex/config.toml -o -path /opt/brahmastra/.config/rclone/rclone.conf ) -exec /bin/chmod 660 {} +
+
+ProtectSystem=strict
+ReadWritePaths=-/opt/brahmastra/.codex -/opt/brahmastra/.config/rclone
+ProtectHome=true
+PrivateTmp=true
+PrivateNetwork=true
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_FOWNER CAP_DAC_READ_SEARCH

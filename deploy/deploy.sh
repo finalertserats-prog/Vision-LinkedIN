@@ -68,12 +68,12 @@ echo "    vision-preflight.timer enabled and started"
 systemctl enable --now vision-token.timer
 echo "    vision-token.timer enabled and started"
 
-# Codex rewrites the shared config as 0600, which locks every app user out of the
-# codex lane (2026-08-06, 2026-09-17). The path unit re-opens it on each rewrite;
+# Codex and rclone rewrite their shared configs as 0600, which locks app users out of the
+# codex lane (2026-08-06, 2026-09-17) and Drive backups. The path unit re-opens them;
 # the explicit start repairs a file that was already broken before the watch began.
-systemctl enable --now brahmastra-codex-perms.path
-systemctl start brahmastra-codex-perms.service
-echo "    brahmastra-codex-perms.path enabled; config permissions repaired once"
+systemctl enable --now brahmastra-shared-perms.path
+systemctl start brahmastra-shared-perms.service
+echo "    brahmastra-shared-perms.path enabled; config permissions repaired once"
 
 echo "=== Restarting always-on web service (only if already active) ==="
 # is-active guard: never *start* a service the operator had deliberately stopped;

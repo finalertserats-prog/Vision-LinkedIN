@@ -66,3 +66,6 @@ prep/voice_profile_draft.yaml
 prep/approve_now.html
 prep/.council_state.json
 assets/
+
+# Google OAuth client downloads - never commit (Brahmastra Drive client, 2026-09-17)
+client_secret*.json

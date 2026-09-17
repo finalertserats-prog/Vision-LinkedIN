@@ -146,9 +146,34 @@ be what your browser can open.
 
 ## 5. Google Drive backups (optional)
 
+Every app on the box shares ONE Drive remote under the Brahmastra core. The
+setup below is already done on the VPS (2026-09-17). Use it to rebuild.
+
+- **Config file:** `/opt/brahmastra/.config/rclone/rclone.conf`. Its directory is
+  `root:brahmastra 2770`, and it holds remote `gdrive` with scope `drive.file`.
+- **OAuth client:** our own, not rclone's shared client, which Google is retiring
+  in 2026.
+  - Google Cloud project `brahmastra-drive`, Desktop client `brahmastra-rclone-vps`.
+  - The consent screen is **In production**. In Testing, refresh tokens die every
+    7 days.
+  - Homepage and privacy policy are served from the `brahmastra-drive` repo via
+    GitHub Pages.
+- **Client JSON:** `/root/.brahmastra-secrets/gdrive-oauth-client.json`, root-only.
+- **How apps find it:** `RCLONE_CONFIG` in `/etc/profile.d/brahmastra.sh` covers
+  shells. For systemd units it must be in the unit's EnvironmentFile (VISION: `.env`).
+- **Permissions:** rclone rewrites the file as `0600` on every token refresh.
+  `brahmastra-shared-perms.path` puts it back to `660` (deploy.sh enables it).
+
+To (re)create the remote, run as `vision` with the client's id and secret. OAuth
+listens on the VPS at 127.0.0.1:53682. Reach it from your browser with
+`ssh -L 53682:127.0.0.1:53682 root@<vps>`.
+
 ```bash
-sudo -u vision rclone config            # new remote "gdrive", type drive, OAuth
-# then in .env:  RCLONE_REMOTE=gdrive
+sudo -u vision RCLONE_CONFIG=/opt/brahmastra/.config/rclone/rclone.conf \
+  rclone config create gdrive drive client_id=<id> client_secret=<secret> scope=drive.file
+# then in /opt/vision/.env:
+#   RCLONE_REMOTE=gdrive
+#   RCLONE_CONFIG=/opt/brahmastra/.config/rclone/rclone.conf
 ```
 
 Until this is set, retention safely archives locally and **skips pruning** (never
