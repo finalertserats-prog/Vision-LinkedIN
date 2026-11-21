@@ -79,6 +79,11 @@ from vision.publish.errors import (
     TransientLinkedInError,
 )
 from vision.publish.linkedin import LinkedInClient
+from vision.publish.reauth_alert import (
+    SUBJECT_EXPIRES_SOON,
+    SUBJECT_REAUTH_REQUIRED,
+    send_reauth_alert_once,
+)
 
 _log = get_logger("vision.publish.token_refresh")
 
@@ -96,6 +101,10 @@ _DEFAULT_REFRESH_WINDOW_DAYS: Final[float] = 7.0
 # not succeed (or would rotate into an about-to-die token) — so we alert for
 # re-auth instead of attempting it. Default 7 days.
 _DEFAULT_REFRESH_TOKEN_MIN_TTL_DAYS: Final[float] = 7.0
+# With no usable refresh token the owner must reconnect by hand. They get ONE
+# heads-up email this close to expiry (owner request 2026-11-21: one email,
+# not a daily countdown); before that the job only logs.
+_REAUTH_HEADS_UP_BEFORE_EXPIRY: Final[timedelta] = timedelta(days=3)
 # Capped retry policy for transient (429/5xx) refresh failures (§15.4).
 _DEFAULT_MAX_ATTEMPTS: Final[int] = 5
 # Exponential-backoff base multiplier (seconds) and ceiling (seconds).
@@ -127,6 +136,7 @@ class RefreshOutcome:
 STATUS_HEALTHY: Final[str] = "healthy"  # not near expiry; nothing to do
 STATUS_REFRESHED: Final[str] = "refreshed"  # new tokens fetched + stored
 STATUS_REAUTH_ALERTED: Final[str] = "reauth_alerted"  # cannot refresh; owner emailed
+STATUS_REAUTH_PENDING: Final[str] = "reauth_pending"  # cannot refresh; heads-up not due yet
 STATUS_DEAD_LETTERED: Final[str] = "dead_lettered"  # transient retries exhausted; alerted
 STATUS_SKIPPED_LOCKED: Final[str] = "skipped_locked"  # another run holds the account lock
 STATUS_DRY_RUN_SKIPPED: Final[str] = "dry_run_skipped"  # dry_run: logged, not executed
@@ -330,37 +340,33 @@ def _refresh_with_backoff(
 
 
 def _send_reauth_alert(
-    sender: EmailSender, settings: Settings, account_id: str, reason: str
+    session: Session,
+    sender: EmailSender,
+    settings: Settings,
+    now: datetime,
+    reason: str,
+    *,
+    subject: str = SUBJECT_REAUTH_REQUIRED,
 ) -> None:
-    """Email the owner that LinkedIn re-authorisation is required.
+    """Email the owner a click-to-fix re-auth link, once per incident.
 
-    Contains only the account id and a short reason — **no token values**. Send
-    failures are swallowed (logged) so a mail outage cannot crash the token job;
-    the account is still left in a recoverable state.
+    Contains a short reason only, never token values. The daily job would
+    otherwise repeat the email every run; ``send_reauth_alert_once`` records the
+    incident and a successful reconnect clears it. Never raises.
     """
-    subject = "VISION: LinkedIn re-authorisation required"
-    body = (
-        "VISION could not refresh your LinkedIn access token and needs you to "
-        f"re-authorise.\n\nAccount: {account_id}\nReason: {reason}\n\n"
-        "Your approved drafts are preserved — please reconnect LinkedIn to resume "
-        "publishing."
+    send_reauth_alert_once(
+        session, sender=sender, settings=settings, now=now, subject=subject, reason=reason
     )
-    html = (
-        "<p>VISION could not refresh your LinkedIn access token and needs you to "
-        "re-authorise.</p>"
-        f"<p><b>Account:</b> {account_id}<br><b>Reason:</b> {reason}</p>"
-        "<p>Your approved drafts are preserved — please reconnect LinkedIn to "
-        "resume publishing.</p>"
-    )
-    # get_sender's providers return False (never raise) on ordinary failure; guard
-    # anyway so an unexpected provider error cannot escape the job.
-    try:
-        delivered = sender.send(subject, body, html, to=settings.email_to)
-    except Exception:  # noqa: BLE001 - last-resort guard around a 3rd-party sender
-        _log.exception("reauth alert send raised for account %s", account_id)
-        return
-    if not delivered:
-        _log.error("reauth alert could not be delivered for account %s", account_id)
+
+
+def needs_attention(outcomes: list[RefreshOutcome]) -> bool:
+    """Whether the run should exit non-zero (which fires the systemd OnFailure alert).
+
+    A re-auth outcome is NOT a job failure: the owner has already been emailed
+    the fix link, and a non-zero exit would send a second "service failed" email.
+    Dead-letters still fail the run.
+    """
+    return any(o.status == STATUS_DEAD_LETTERED for o in outcomes)
 
 
 def _audit(session: Session, account_id: str, action: str, reason: str, now: datetime) -> None:
@@ -552,7 +558,13 @@ def _do_locked_refresh(
         if access_expiry is not None:
             reason += f"; access token expires {access_expiry:%Y-%m-%d %H:%M} UTC"
         _log.warning("cannot refresh account %s: %s", account_id, reason)
-        _send_reauth_alert(sender, settings, account_id, reason)
+        if access_expiry is not None and access_expiry > now + _REAUTH_HEADS_UP_BEFORE_EXPIRY:
+            return RefreshOutcome(account_id, STATUS_REAUTH_PENDING, reason)
+        expired = access_expiry is None or access_expiry <= now
+        _send_reauth_alert(
+            session, sender, settings, now, reason,
+            subject=SUBJECT_REAUTH_REQUIRED if expired else SUBJECT_EXPIRES_SOON,
+        )
         _audit(session, account_id, "reauth_alert", reason, now)
         return RefreshOutcome(account_id, STATUS_REAUTH_ALERTED, reason)
 
@@ -570,7 +582,7 @@ def _do_locked_refresh(
         # unrecoverable here → alert for re-auth rather than crash.
         reason = "stored refresh token could not be decrypted"
         _log.error("account %s: %s", account_id, reason)
-        _send_reauth_alert(sender, settings, account_id, reason)
+        _send_reauth_alert(session, sender, settings, now, reason)
         _audit(session, account_id, "reauth_alert", reason, now)
         return RefreshOutcome(account_id, STATUS_REAUTH_ALERTED, reason)
 
@@ -587,14 +599,14 @@ def _do_locked_refresh(
         # 401 on refresh: the grant is dead. Alert + keep state (§15.4 401).
         reason = "LinkedIn rejected the refresh token (401)"
         _log.warning("account %s: %s", account_id, reason)
-        _send_reauth_alert(sender, settings, account_id, reason)
+        _send_reauth_alert(session, sender, settings, now, reason)
         _audit(session, account_id, "reauth_alert", reason, now)
         return RefreshOutcome(account_id, STATUS_REAUTH_ALERTED, reason)
     except RetryError:
         # Transient (429/5xx) retries exhausted → dead-letter + alert (§15.4).
         reason = "transient refresh failures exhausted retries"
         _log.error("account %s: %s", account_id, reason)
-        _send_reauth_alert(sender, settings, account_id, reason)
+        _send_reauth_alert(session, sender, settings, now, reason)
         _audit(session, account_id, "token_refresh_dead_letter", reason, now)
         return RefreshOutcome(account_id, STATUS_DEAD_LETTERED, reason)
     except LinkedInError as exc:
@@ -602,7 +614,7 @@ def _do_locked_refresh(
         # retryable → alert for re-auth, keep state.
         reason = f"refresh failed: {exc.__class__.__name__}"
         _log.error("account %s: %s", account_id, reason)
-        _send_reauth_alert(sender, settings, account_id, reason)
+        _send_reauth_alert(session, sender, settings, now, reason)
         _audit(session, account_id, "reauth_alert", reason, now)
         return RefreshOutcome(account_id, STATUS_REAUTH_ALERTED, reason)
 
@@ -616,7 +628,7 @@ def _do_locked_refresh(
         # offending field values, which may include token material.
         reason = "LinkedIn refresh response failed schema validation"
         _log.error("account %s: %s", account_id, reason)
-        _send_reauth_alert(sender, settings, account_id, reason)
+        _send_reauth_alert(session, sender, settings, now, reason)
         _audit(session, account_id, "reauth_alert", reason, now)
         return RefreshOutcome(account_id, STATUS_REAUTH_ALERTED, reason)
 
@@ -755,10 +767,7 @@ def main() -> int:
     _log.info("vision-token complete", extra={"counts": counts})
 
     # Signal a non-zero exit if any account needs manual re-auth or was dead-lettered.
-    needs_attention = any(
-        o.status in (STATUS_REAUTH_ALERTED, STATUS_DEAD_LETTERED) for o in outcomes
-    )
-    return 1 if needs_attention else 0
+    return 1 if needs_attention(outcomes) else 0
 
 
 if __name__ == "__main__":

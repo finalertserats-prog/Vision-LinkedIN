@@ -18,11 +18,7 @@ from uuid import uuid4
 from vision.config import get_settings
 from vision.db.session import get_session
 from vision.logging_setup import configure_logging, get_logger
-from vision.publish.token_refresh import (
-    STATUS_DEAD_LETTERED,
-    STATUS_REAUTH_ALERTED,
-    refresh_if_needed,
-)
+from vision.publish.token_refresh import needs_attention, refresh_if_needed
 
 logger = get_logger("vision.cli.token")
 
@@ -69,10 +65,7 @@ def main() -> int:
         counts[outcome.status] = counts.get(outcome.status, 0) + 1
     logger.info("vision-token complete", extra={"counts": counts})
 
-    needs_attention = any(
-        outcome.status in (STATUS_REAUTH_ALERTED, STATUS_DEAD_LETTERED) for outcome in outcomes
-    )
-    return 1 if needs_attention else 0
+    return 1 if needs_attention(outcomes) else 0
 
 
 if __name__ == "__main__":

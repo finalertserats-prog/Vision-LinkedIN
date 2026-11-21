@@ -44,6 +44,7 @@ from vision.config import Settings, get_settings
 
 from . import crypto
 from .linkedin import LinkedInClient
+from .reauth_alert import clear_reauth_incidents
 
 # Import the model lazily-safe: models register on import, and this is a stored
 # credential record, so the dependency is intrinsic to this module's job.
@@ -65,6 +66,10 @@ _account_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 class OAuthError(Exception):
     """Base error for the OAuth glue (BRD §22 typed, specific exceptions)."""
+
+
+class OAuthMemberMismatch(OAuthError):
+    """The consenting LinkedIn member is not the account VISION already posts as."""
 
 
 class OAuthStateError(OAuthError):
@@ -252,6 +257,10 @@ def save_tokens(
                     extra={"provider": _PROVIDER, "member_urn": member_urn},
                 )
 
+    # A fresh token ends any LinkedIn re-auth incident, so the next expiry gets
+    # its own single email (reauth_alert's once-per-incident ledger).
+    clear_reauth_incidents(session)
+
     # Metadata-only log: member + expiries are not secret; tokens never appear.
     _log.info(
         "oauth_tokens_saved",
@@ -321,6 +330,7 @@ def handle_callback(
     expected_state: str,
     client: LinkedInClient | None = None,
     settings: Settings | None = None,
+    require_known_member: bool = False,
 ) -> str:
     """Complete the OAuth callback: verify CSRF, exchange, store encrypted (§15.1/§15.3).
 
@@ -352,6 +362,20 @@ def handle_callback(
 
     # Step 3 — resolve the member URN (author identity + encryption AAD).
     member_urn = li.get_member_urn(access_token)
+
+    # A web reconnect may only renew the account VISION already posts as: a
+    # forwarded or leaked email link must not attach a stranger's LinkedIn.
+    if require_known_member:
+        known = set(
+            session.scalars(
+                select(OAuthToken.member_urn).where(OAuthToken.provider == _PROVIDER)
+            )
+        )
+        # No connected account at all: refuse. A first connection goes through
+        # the operator script (scripts/authorize_linkedin.py), never an email link.
+        if member_urn not in known:
+            _log.warning("oauth_callback_member_mismatch", extra={"provider": _PROVIDER})
+            raise OAuthMemberMismatch("consenting member is not the connected account")
 
     # Step 4 — encrypt-at-rest and persist atomically for this account.
     save_tokens(

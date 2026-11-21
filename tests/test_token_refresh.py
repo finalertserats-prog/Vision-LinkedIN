@@ -34,10 +34,13 @@ from vision.publish.token_refresh import (
     STATUS_DEAD_LETTERED,
     STATUS_HEALTHY,
     STATUS_REAUTH_ALERTED,
+    STATUS_REAUTH_PENDING,
     STATUS_REFRESHED,
     STATUS_SKIPPED_LOCKED,
+    RefreshOutcome,
     decrypt_token,
     encrypt_token,
+    needs_attention,
     refresh_if_needed,
 )
 
@@ -589,3 +592,57 @@ def test_main_fails_closed_when_settings_load_raises(
     assert record.error_type == "RuntimeError"
     assert record.exc_info is None
     assert _TOKEN_SECRET_MARKER not in caplog.text
+
+
+
+# ===========================================================================
+# One heads-up email, 3 days before expiry (owner request 2026-11-21).
+# ===========================================================================
+
+
+def _seed_access_only(session: Session, expires_in: timedelta) -> None:
+    """LinkedIn gives this app no refresh token: only an access token is stored."""
+    token = _seed_token(session, access_expires_at=_NOW + expires_in, refresh_expires_at=None)
+    token.refresh_token_enc = None
+    session.flush()
+
+
+def test_no_email_while_more_than_three_days_remain(
+    db_session: Session, settings: Settings, tmp_path: Path
+) -> None:
+    _seed_access_only(db_session, timedelta(days=6))
+    sender = Mock()
+
+    outcomes = refresh_if_needed(
+        db_session, _NOW, settings=settings, client=_StubLinkedInClient({}),
+        sender=sender, lock_dir=tmp_path,
+    )
+
+    assert outcomes[0].status == STATUS_REAUTH_PENDING
+    sender.send.assert_not_called()
+
+
+def test_heads_up_is_sent_once_across_daily_runs(
+    db_session: Session, settings: Settings, tmp_path: Path
+) -> None:
+    _seed_access_only(db_session, timedelta(days=3))
+    sender = Mock()
+
+    for day in range(3):
+        refresh_if_needed(
+            db_session, _NOW + timedelta(days=day), settings=settings,
+            client=_StubLinkedInClient({}), sender=sender, lock_dir=tmp_path,
+        )
+
+    assert sender.send.call_count == 1
+
+
+def test_a_handled_reauth_reminder_does_not_fail_the_job() -> None:
+    # A non-zero exit fires the systemd OnFailure email: a second email per day.
+    outcome = RefreshOutcome("acct", STATUS_REAUTH_ALERTED, "owner emailed")
+    assert needs_attention([outcome]) is False
+
+
+def test_a_dead_lettered_refresh_still_fails_the_job() -> None:
+    outcome = RefreshOutcome("acct", STATUS_DEAD_LETTERED, "retries exhausted")
+    assert needs_attention([outcome]) is True

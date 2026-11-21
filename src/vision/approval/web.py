@@ -34,6 +34,7 @@ Layered defences wired here (threat model §1/§2):
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -43,7 +44,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Session
 
@@ -52,6 +53,14 @@ from vision.approval.errors import ApprovalTokenError
 from vision.approval.tokens import VerifiedToken
 from vision.config import Settings, get_settings
 from vision.db.session import get_session
+from vision.publish import oauth
+from vision.publish.errors import LinkedInError
+from vision.publish.linkedin import LinkedInClient
+from vision.publish.reauth_link import (
+    REAUTH_CALLBACK_PATH,
+    REAUTH_START_PATH,
+    is_valid_reauth_link_token,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -132,12 +141,21 @@ def _client_key(request: Request, token: str) -> str:
     return f"{ip}:{token[:12]}"
 
 
+# The OAuth anti-CSRF state travels in this cookie between /start and /callback.
+# Scoped to the OAuth paths; SameSite=Lax so it survives LinkedIn's top-level
+# redirect back to us; short-lived because the consent takes a minute.
+_OAUTH_STATE_COOKIE = "vision_li_oauth_state"
+_OAUTH_COOKIE_PATH = "/oauth/linkedin"
+_OAUTH_STATE_TTL_SECONDS = 600
+
+
 def create_app(
     *,
     settings: Settings | None = None,
     publisher: service.PublisherPort | None = None,
     session_factory: SessionFactory | None = None,
     rate_limiter: InMemoryRateLimiter | None = None,
+    linkedin_client_factory: Callable[[], LinkedInClient] | None = None,
 ) -> FastAPI:
     """Build and return the configured ``vision-web`` FastAPI application.
 
@@ -151,6 +169,7 @@ def create_app(
     app_sessions: SessionFactory = session_factory or get_session
     limiter = rate_limiter or InMemoryRateLimiter()
     palette = edit_page.build_palette(app_settings)
+    make_linkedin = linkedin_client_factory or (lambda: LinkedInClient(settings=app_settings))
 
     # Public API docs are disabled in every environment: the threat model calls
     # for "no public docs", and there is nothing for a human to explore here —
@@ -301,6 +320,81 @@ def create_app(
             "env": app_settings.vision_env.value,
         }
         return JSONResponse(payload, status_code=200 if db_ok else 503)
+
+    # --- LinkedIn reconnect (click-to-fix link from the re-auth email) -----
+    # Registered BEFORE the "/{path_action}" catch-all.
+    @app.get(REAUTH_START_PATH)
+    def linkedin_reconnect_start(request: Request, t: str = "") -> Response:
+        """Valid signed email link -> LinkedIn consent, with a state cookie."""
+        if not limiter.allow(_client_key(request, "oauth-start")):
+            return _error_response(status_code=429)
+        if not is_valid_reauth_link_token(
+            t, app_settings.secret_hmac_key, datetime.now(timezone.utc)
+        ):
+            _log.info("linkedin reconnect link rejected")
+            return _error_response()
+        state = secrets.token_urlsafe(32)
+        linkedin = make_linkedin()
+        try:
+            consent_url = oauth.start_authorize(state, client=linkedin)
+        finally:
+            linkedin.close()
+        response = RedirectResponse(consent_url, status_code=303)
+        response.set_cookie(
+            _OAUTH_STATE_COOKIE,
+            state,
+            max_age=_OAUTH_STATE_TTL_SECONDS,
+            path=_OAUTH_COOKIE_PATH,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+        )
+        return response
+
+    @app.get(REAUTH_CALLBACK_PATH, response_class=HTMLResponse)
+    def linkedin_reconnect_callback(
+        request: Request, code: str = "", state: str = ""
+    ) -> Response:
+        """LinkedIn redirect target: verify state, store the owner's new token."""
+        if not limiter.allow(_client_key(request, "oauth-callback")):
+            return _error_response(status_code=429)
+        expected_state = request.cookies.get(_OAUTH_STATE_COOKIE, "")
+        # No cookie means this browser never came through a valid /start link:
+        # refuse before the one-time code is spent.
+        if not (code and state and expected_state):
+            return _oauth_done(_error_response())
+        linkedin = make_linkedin()
+        try:
+            with app_sessions() as session:
+                oauth.handle_callback(
+                    session,
+                    code=code,
+                    state=state,
+                    expected_state=expected_state,
+                    client=linkedin,
+                    settings=app_settings,
+                    require_known_member=True,
+                )
+        except (oauth.OAuthError, LinkedInError) as exc:
+            _log.warning("linkedin reconnect failed: %s", type(exc).__name__)
+            return _oauth_done(_error_response())
+        finally:
+            linkedin.close()
+        return _oauth_done(HTMLResponse(
+            edit_page.render_result_page(
+                heading="LinkedIn reconnected",
+                message=(
+                    "VISION can post again. Approved posts go out within the next "
+                    "5 minutes. You can close this tab."
+                ),
+                palette=palette,
+            )
+        ))
+
+    def _oauth_done(response: Response) -> Response:
+        """End the attempt either way: the state is single-use."""
+        response.delete_cookie(_OAUTH_STATE_COOKIE, path=_OAUTH_COOKIE_PATH)
+        return response
 
     @app.get("/{path_action}", response_class=HTMLResponse)
     def show_confirmation(path_action: str, request: Request, token: str = "") -> Response:

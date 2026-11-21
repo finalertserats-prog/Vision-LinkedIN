@@ -895,3 +895,26 @@ def test_main_fails_closed_when_settings_load_raises(
     assert record.error_type == "RuntimeError"
     assert record.exc_info is None
     assert _PROVIDER_SECRET_MARKER not in caplog.text
+
+
+
+# --- Re-auth alert: one email per incident, not one per 5-minute tick -------
+
+
+def _tick(settings: Settings, mailer: Mock, now: datetime) -> LinkedInPublisher:
+    """A fresh publisher per call mimics a fresh cron process."""
+    return LinkedInPublisher(settings, client=_mock_client(), mailer=mailer, now=lambda: now)
+
+
+def test_reauth_alert_is_sent_once_across_repeated_cron_ticks(db_session: Session) -> None:
+    # Arrange: no LinkedIn token stored, so every tick is blocked on re-auth.
+    settings = _make_settings(VisionEnv.LIVE)
+    mailer = Mock()
+    draft = _seed_draft(db_session)
+
+    # Act: ticks 5 minutes apart and again a day later.
+    for minutes in (0, 5, 10, 60 * 25):
+        _tick(settings, mailer, _NOW + timedelta(minutes=minutes)).publish(db_session, draft)
+
+    # Assert: the owner hears about it once.
+    assert mailer.send.call_count == 1

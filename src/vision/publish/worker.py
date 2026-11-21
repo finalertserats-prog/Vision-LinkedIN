@@ -71,6 +71,7 @@ from vision.council.compose import find_forbidden_name
 from vision.db.models import AuditLog, Draft, OAuthToken
 from vision.logging_setup import get_logger
 from vision.mailer.sender import EmailSender, get_sender
+from vision.publish.reauth_alert import SUBJECT_REAUTH_REQUIRED, send_reauth_alert_once
 from vision.publish import crypto
 from vision.publish.errors import (
     LinkedInError,
@@ -389,7 +390,7 @@ class LinkedInPublisher:
                 "publish blocked: credentials unavailable",
                 extra={"draft_id": draft_id, "reason": exc.__class__.__name__},
             )
-            self._alert_reauth(draft, reason=exc.__class__.__name__)
+            self._alert_reauth(session, draft, reason=exc.__class__.__name__)
             return draft
 
         # (5) Claim so a concurrent runner cannot also post this draft. The claim
@@ -411,7 +412,7 @@ class LinkedInPublisher:
         except ReauthRequired:
             # 401 persisted after a refresh: keep the approved draft, alert owner.
             self._revert_claim(session, draft)
-            self._alert_reauth(draft, reason="unauthorised_after_refresh")
+            self._alert_reauth(session, draft, reason="unauthorised_after_refresh")
             return draft
         except RateLimited as exc:
             # 429 exhausted its backoff budget. A 429 is a KNOWN rejection — the
@@ -1194,19 +1195,21 @@ class LinkedInPublisher:
         )
         self._mailer_or_build().send(subject, text, f"<p>{text}</p>")
 
-    def _alert_reauth(self, draft: Draft, *, reason: str) -> None:
-        """Alert the owner that LinkedIn re-authorisation is required. Never raises.
+    def _alert_reauth(self, session: Session, draft: Draft, *, reason: str) -> None:
+        """Tell the owner LinkedIn needs reconnecting: once per incident. Never raises.
 
         The approved draft is kept intact; it publishes automatically once the
-        owner re-authorises (BRD §15.4 401).
+        owner re-authorises (BRD §15.4 401). The publisher ticks every ~5 min, so
+        the alert is deduplicated per incident, not per tick (2026-11-21 flood).
         """
-        subject = "VISION — LinkedIn re-authorisation required"
-        text = (
-            f"Publishing draft {draft.id} is blocked: {reason}.\n"
-            "Please re-authorise LinkedIn; the approved post will publish "
-            "automatically once access is restored."
+        send_reauth_alert_once(
+            session,
+            sender=self._mailer_or_build(),
+            settings=self._settings,
+            now=self._now(),
+            subject=SUBJECT_REAUTH_REQUIRED,
+            reason=f"Publishing an approved post is blocked ({reason}). Draft {draft.id}.",
         )
-        self._mailer_or_build().send(subject, text, f"<p>{text}</p>")
 
 
 def main() -> int:
